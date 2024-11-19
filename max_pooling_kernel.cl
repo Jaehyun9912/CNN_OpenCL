@@ -1,5 +1,5 @@
 
-const int STRIDE = 2
+const int STRIDE = 2;
 
 __kernel void max_pooling(__global float* input,
                           __global float* output,
