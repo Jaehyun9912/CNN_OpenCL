@@ -1,8 +1,8 @@
 #pragma warning(disable : 4996)
 #include "cnn.h"
-#include <time.h>
-#include <stdio.h>
+#include <ctime>
 #include <CL/cl.h>
+#include <cmath>
 #include <iostream>
 #include <fstream>
 
@@ -288,7 +288,7 @@ void fc_layer_cl(float* inputs, float* outputs, float* weights, float* biases, i
 	CHECK_ERROR(Err);
 
 	int max = inDim > outDim ? inDim : outDim;
-	size_t global[2] = { max, 1 };
+	size_t global[2] = { (size_t)max, 1 };
 
 	// ================== Kernel Arguments ==================
 	clSetKernelArg(FCLayerKernel, 0, sizeof(cl_mem), &input_buffer);
