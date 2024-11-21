@@ -1,10 +1,8 @@
+#pragma warning(disable : 4996)
 #include "cnn.h"
-#include <ctime>
-#include <stdio.h>
 #include <time.h>
-#include <math.h>
+#include <stdio.h>
 #include <CL/cl.h>
-
 #include <iostream>
 #include <fstream>
 
@@ -13,8 +11,6 @@
 		printf("[%s:%d] OpenCL error %d\n", __FILE__, __LINE__, err);\
 		exit(EXIT_FAILURE); \
 	}
-
-#define CLK_TCK CLOCKS_PER_SEC
 
 cl_int Err;
 cl_platform_id Platform;
@@ -173,6 +169,7 @@ void cnn_init() {
 
 void convolution_cl(float* inputs, float* outputs, float* filter, float* biases, int inDim, int outDim, int nbyn) {
 	size_t global_work_size[] = { (size_t)nbyn, (size_t)nbyn }; // 병렬 처리를 위한 워크 아이템 크기
+
 	size_t ls = nbyn < 16 ? nbyn : 16;
 	size_t local_work_size[] = { ls, ls }; // 워크 그룹 크기 (최적화 필요)
 
@@ -210,8 +207,6 @@ void convolution_cl(float* inputs, float* outputs, float* filter, float* biases,
 	);
 	CHECK_ERROR(Err);
 
-
-
 	// ================== Kernel Arguments ==================
 	clSetKernelArg(ConvolutionKernel, 0, sizeof(cl_mem), &input_buffer);
 	clSetKernelArg(ConvolutionKernel, 1, sizeof(cl_mem), &output_buffer);
@@ -224,7 +219,6 @@ void convolution_cl(float* inputs, float* outputs, float* filter, float* biases,
 	// ================== 실행하고 결과 받기 ==================
 	Err = clEnqueueNDRangeKernel(Queue, ConvolutionKernel, 2, NULL, global_work_size, local_work_size, 0, NULL, NULL);
 	CHECK_ERROR(Err);
-
 	Err = clEnqueueReadBuffer(Queue, output_buffer, CL_TRUE, 0,
 		sizeof(float) * outDim * nbyn * nbyn, outputs, 0, NULL, NULL);
 	CHECK_ERROR(Err);
@@ -246,7 +240,6 @@ void max_pooling_cl(float* input, float* output, int dim, int nbyn) {
 
 	cl_mem output_buffer = clCreateBuffer(Context, CL_MEM_READ_WRITE, sizeof(float) * dim * nbyn * nbyn / 4, NULL, &Err);
 	CHECK_ERROR(Err);
-
 
 	// Set Kernel Args
 	Err = clSetKernelArg(MaxPoolingKernel, 0, sizeof(cl_mem), &input_buffer);
@@ -287,7 +280,7 @@ void fc_layer_cl(float* inputs, float* outputs, float* weights, float* biases, i
 	CHECK_ERROR(Err);
 
 	cl_mem weight_buffer = clCreateBuffer(Context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
-		sizeof(float) * inDim * outDim, biases, &Err);
+		sizeof(float) * inDim * outDim, weights, &Err);
 	CHECK_ERROR(Err);
 
 	cl_mem bias_buffer = clCreateBuffer(Context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
@@ -295,11 +288,11 @@ void fc_layer_cl(float* inputs, float* outputs, float* weights, float* biases, i
 	CHECK_ERROR(Err);
 
 	int max = inDim > outDim ? inDim : outDim;
-	size_t global[2] = { (size_t)max, 1 };
+	size_t global[2] = { max, 1 };
 
 	// ================== Kernel Arguments ==================
 	clSetKernelArg(FCLayerKernel, 0, sizeof(cl_mem), &input_buffer);
-	clSetKernelArg(FCLayerKernel, 1, sizeof(cl_mem), NULL);
+	clSetKernelArg(FCLayerKernel, 1, sizeof(float) * inDim, NULL);
 	clSetKernelArg(FCLayerKernel, 2, sizeof(cl_mem), &output_buffer);
 	clSetKernelArg(FCLayerKernel, 3, sizeof(cl_mem), &weight_buffer);
 	clSetKernelArg(FCLayerKernel, 4, sizeof(cl_mem), &bias_buffer);
@@ -307,10 +300,10 @@ void fc_layer_cl(float* inputs, float* outputs, float* weights, float* biases, i
 	clSetKernelArg(FCLayerKernel, 6, sizeof(int), &outDim);
 
 	// ================== 실행하고 결과 받기 ==================
-	Err = clEnqueueNDRangeKernel(Queue, FCLayerKernel, 2, NULL, global, NULL, 0, NULL, NULL);
+	Err = clEnqueueNDRangeKernel(Queue, FCLayerKernel, 1, NULL, global, NULL, 0, NULL, NULL);
 	CHECK_ERROR(Err);
-	Err = clEnqueueReadBuffer(Queue, output_buffer, CL_TRUE, 0,
-		sizeof(float) * outDim, outputs, 0, NULL, NULL);
+
+	Err = clEnqueueReadBuffer(Queue, output_buffer, CL_TRUE, 0, sizeof(float) * outDim, outputs, 0, NULL, NULL);
 	CHECK_ERROR(Err);
 
 	Err = clFinish(Queue);
