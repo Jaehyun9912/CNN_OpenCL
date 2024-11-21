@@ -29,11 +29,11 @@ void compare(const char* filename, int num_of_image) {
 	for (int i = 0; i < num_of_image; ++i) {
 
 		retv = fscanf(fp1, "Image %*4d : %d : %*10s\t%f\n", correctClass + i, correctConf + i);
-		if (retv = 0) {
+		if (retv == 0) {
 			perror("error while fscanf");
 		}
 		retv = fscanf(fp2, "Image %*4d : %d : %*10s\t%f\n", yourClass + i, yourConf + i);
-		if (retv = 0) {
+		if (retv == 0) {
 			perror("error while fscanf");
 		}
 		//printf("%d : %d, %f %f\n", correctClass[i], yourClass[i], correctConf[i], yourConf[i]);
