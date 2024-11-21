@@ -3,10 +3,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
-#include <windows.h>
+// #include <windows.h>
 #include <math.h>
 #include <time.h>
-#include <direct.h>
+// #include <direct.h>
+
+#define CLK_TCK CLOCKS_PER_SEC
 
 extern const char* CLASS_NAME[];
 
@@ -74,7 +76,6 @@ static void max_pooling(float* input, float* output, int DIM, int nbyn) {
 		input += nbyn * nbyn;
 	}
 }
-
 
 void fc_layer(float* input, float* output, float* weights, float* biases, int inDim, int outDim) {
 	float sum;

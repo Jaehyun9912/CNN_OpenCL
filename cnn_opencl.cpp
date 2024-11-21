@@ -170,9 +170,6 @@ void cnn_init() {
 void convolution_cl(float* inputs, float* outputs, float* filter, float* biases, int inDim, int outDim, int nbyn) {
 	size_t global_work_size[] = { (size_t)nbyn, (size_t)nbyn }; // 병렬 처리를 위한 워크 아이템 크기
 
-	size_t ls = nbyn < 16 ? nbyn : 16;
-	size_t local_work_size[] = { ls, ls }; // 워크 그룹 크기 (최적화 필요)
-
 	// ================== 버퍼 생성 ==================
 	cl_mem input_buffer = clCreateBuffer(
 		Context,
@@ -217,7 +214,7 @@ void convolution_cl(float* inputs, float* outputs, float* filter, float* biases,
 	clSetKernelArg(ConvolutionKernel, 6, sizeof(int), &nbyn);
 
 	// ================== 실행하고 결과 받기 ==================
-	Err = clEnqueueNDRangeKernel(Queue, ConvolutionKernel, 2, NULL, global_work_size, local_work_size, 0, NULL, NULL);
+	Err = clEnqueueNDRangeKernel(Queue, ConvolutionKernel, 2, NULL, global_work_size, NULL, 0, NULL, NULL);
 	CHECK_ERROR(Err);
 	Err = clEnqueueReadBuffer(Queue, output_buffer, CL_TRUE, 0,
 		sizeof(float) * outDim * nbyn * nbyn, outputs, 0, NULL, NULL);
@@ -231,6 +228,49 @@ void convolution_cl(float* inputs, float* outputs, float* filter, float* biases,
 	clReleaseMemObject(filter_buffer);
 	clReleaseMemObject(bias_buffer);
 	clReleaseMemObject(output_buffer);
+}
+
+static void convolution(float* inputs, float* outputs, float* filter, float* biases, int inDim, int outDim, int nbyn) {
+
+	memset(outputs, 0, nbyn * nbyn * outDim * sizeof(float));
+	int x = 0, y = 0;
+	int offset = nbyn * nbyn;
+	float sum = 0, temp;
+	float* input, * output;
+
+	for (int outNeuron = 0; outNeuron < outDim; ++outNeuron) {
+		input = inputs;
+		for (int inNeuron = 0; inNeuron < inDim; ++inNeuron) {
+			output = outputs;
+			for (int row = 0; row < nbyn; ++row) {
+				for (int col = 0; col < nbyn; ++col) {
+					sum = 0;
+					for (int fRow = 0; fRow < 3; ++fRow) {
+						for (int fCol = 0; fCol < 3; ++fCol) {
+							x = col + fCol - 1;
+							y = row + fRow - 1;
+
+							if (x >= 0 && x < nbyn && y >= 0 && y < nbyn) {
+								sum += input[nbyn * y + x] * filter[3 * fRow + fCol];
+							}
+
+						}
+					}
+					*(output++) += sum;
+				}
+			}
+			filter += 9;
+			input += offset;
+
+		}
+		for (int i = 0; i < offset; ++i) {
+			(*outputs) = (*outputs) + (*biases);
+			if (*outputs < 0) (*outputs) = 0;	//ReLU
+			outputs++;
+		}
+		++biases;
+	}
+
 }
 
 void max_pooling_cl(float* input, float* output, int dim, int nbyn) {
@@ -254,7 +294,7 @@ void max_pooling_cl(float* input, float* output, int dim, int nbyn) {
 	size_t local_item_size[] = { (size_t)nbyn / 2, (size_t)nbyn / 2 };
 
 	// Run Kernel
-	Err = clEnqueueNDRangeKernel(Queue, MaxPoolingKernel, 2, global_item_size, local_item_size, NULL, 0, NULL, NULL);
+	Err = clEnqueueNDRangeKernel(Queue, MaxPoolingKernel, 2, NULL, global_item_size, local_item_size, 0, NULL, NULL);
 	CHECK_ERROR(Err);
 
 	Err = clEnqueueReadBuffer(Queue, output_buffer, CL_TRUE, 0, sizeof(float) * dim * nbyn * nbyn / 4, output, 0, NULL, NULL);
@@ -264,8 +304,8 @@ void max_pooling_cl(float* input, float* output, int dim, int nbyn) {
 	CHECK_ERROR(Err);
 
 	// Release Memory
-	if (input_buffer != NULL) clReleaseMemObject(input_buffer);
-	if(output_buffer != NULL) clReleaseMemObject(output_buffer);
+	clReleaseMemObject(input_buffer);
+	clReleaseMemObject(output_buffer);
 }
 
 void fc_layer_cl(float* inputs, float* outputs, float* weights, float* biases, int inDim, int outDim) {
@@ -314,6 +354,19 @@ void fc_layer_cl(float* inputs, float* outputs, float* weights, float* biases, i
 	clReleaseMemObject(output_buffer);
 	clReleaseMemObject(weight_buffer);
 	clReleaseMemObject(bias_buffer);
+}
+
+void fc_layer(float* input, float* output, float* weights, float* biases, int inDim, int outDim) {
+	float sum;
+	for (int outNeuron = 0; outNeuron < outDim; ++outNeuron) {
+		sum = 0;
+		for (int inNeuron = 0; inNeuron < inDim; ++inNeuron) {
+			sum += input[inNeuron] * (*weights++);
+		}
+		sum += biases[outNeuron];
+		if (sum > 0) output[outNeuron] = sum;	//ReLU
+		else output[outNeuron] = 0;
+	}
 }
 
 static void softmax_cl(float* input, int N) {
