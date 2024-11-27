@@ -179,6 +179,7 @@ void cnn_init() {
 
 // 이미지 크기에 따른 워크 그룹 동적 조정
 void adjust_work_group_size(int nbyn, size_t& local_size) {
+	// 이미지 크기에 따른 워크 그룹 동적 조정
 	if (nbyn < 4) {
 		local_size = 1;  // 매우 작은 이미지
 	}
@@ -271,7 +272,6 @@ void convolution_cl(float* inputs, float* outputs, float* filter, float* biases,
 	clReleaseMemObject(output_buffer);
 	clReleaseMemObject(filter_buffer);
 	clReleaseMemObject(bias_buffer);
-	clReleaseMemObject(output_buffer);
 }
 
 
@@ -293,8 +293,6 @@ void max_pooling_cl(float* input, float* output, int dim, int nbyn) {
 	CHECK_ERROR(Err);
 
 	// Set Work Size
-	// { dim, nbn * nbyn / 4 }
-	// { nbyn / 2, nbyn / 2}
 	size_t global_item_size[] = { (size_t)dim, (size_t)(nbyn /2), (size_t)(nbyn /2) };
 	size_t local_item_size[] = { 1, (size_t)nbyn / 2, (size_t)nbyn / 2};
 	// Run Kernel
@@ -307,9 +305,10 @@ void max_pooling_cl(float* input, float* output, int dim, int nbyn) {
 	Err = clFinish(Queue);
 	CHECK_ERROR(Err);
 
+	//==== 프로파일링 ====
 	clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_START, sizeof(cl_ulong), &time_start, nullptr);
 	clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_END, sizeof(cl_ulong), &time_end, nullptr);
-	std::cout << "MaxPooling time: " << time_end - time_start << "ns" << std::endl;
+	// std::cout << "MaxPooling time: " << time_end - time_start << "ns" << std::endl;
 
 	// Release Memory
 	clReleaseMemObject(input_buffer);
@@ -317,7 +316,7 @@ void max_pooling_cl(float* input, float* output, int dim, int nbyn) {
 }
 
 
-//512입력차원에서 512출력차원으로 가는 완전연결신경망에 최적화된 커널을 호출
+// 512입력차원에서 512출력차원으로 가는 완전연결신경망에 최적화된 커널을 호출
 void fc_layer_optimized_512_512(float* inputs, float* outputs, float* weights, float* biases, int inDim, int outDim) {
 	// ================== 버퍼 생성 ==================
 	cl_mem input_buffer = clCreateBuffer(Context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
@@ -364,7 +363,7 @@ void fc_layer_optimized_512_512(float* inputs, float* outputs, float* weights, f
 	// ================== 프로파일링 ==================
 	clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_START, sizeof(cl_ulong), &time_start, NULL);
 	clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_END, sizeof(cl_ulong), &time_end, NULL);
-	printf("FCLayer Elapsed Time = %lu ns\n", time_end - time_start);
+	// printf("FCLayer Elapsed Time = %lu ns\n", time_end - time_start);
 
 	// ================== 메모리 해제 ==================
 	clReleaseMemObject(input_buffer);
@@ -417,7 +416,7 @@ void fc_layer_optimized_512_10(float* inputs, float* outputs, float* weights, fl
 	// ================== 프로파일링 ==================
 	clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_START, sizeof(cl_ulong), &time_start, NULL);
 	clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_END, sizeof(cl_ulong), &time_end, NULL);
-	printf("FCLayer Elapsed Time = %lu ns\n", time_end - time_start);
+	// printf("FCLayer Elapsed Time = %lu ns\n", time_end - time_start);
 
 	// ================== 메모리 해제 ==================
 	clReleaseMemObject(input_buffer);

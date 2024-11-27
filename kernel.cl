@@ -1,6 +1,7 @@
 const int MAX_TILE_SIZE = 16;
 
-__kernel void convolution(
+__kernel
+void convolution(
 	__global const float* input,
 	__global float* output,
 	__global const float* filter,
@@ -102,14 +103,14 @@ __kernel void fc_layer_optimized_512_512(
 	outputs[output_id] = max(sum, 0.0f);
 }
 
-
 __kernel void fc_layer_optimized_512_10(
 	__global float* inputs,
 	__global float* outputs,
 	__global float* weights,
 	__global float* biases,
 	int inDim,
-	int outDim) {
+	int outDim
+) {
 	__local float local_inputs[512];
 
 	//워크 그룹의 크기를 출력뉴런의 차원과 일치시켰다
@@ -137,7 +138,6 @@ __kernel void fc_layer_optimized_512_10(
 	outputs[global_id] = max(sum, 0.0f);
 }
 
-const int STRIDE = 2;
 
 __kernel void max_pooling(
 	__global float* input,
