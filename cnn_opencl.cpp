@@ -1,10 +1,11 @@
 #pragma warning(disable : 4996)
 #include "cnn.h"
-#include <ctime>
 #include <CL/cl.h>
+#include <ctime>
 #include <cmath>
-#include <iostream>
+#include <cstring>
 #include <fstream>
+#include <iostream>
 
 #define CHECK_ERROR(err) \
 	if(err != CL_SUCCESS) { \
@@ -12,16 +13,20 @@
 		exit(EXIT_FAILURE); \
 	}
 
+// CL variables
 cl_int Err;
 cl_platform_id Platform;
 cl_device_id Device;
 cl_context Context;
 cl_command_queue Queue;
+cl_event read_event;
+cl_ulong time_start, time_end;
 
 // kernels
 cl_kernel ConvolutionKernel;
-cl_kernel FCLayerKernel;
 cl_kernel MaxPoolingKernel;
+cl_kernel FCLayer512to512Kernel;
+cl_kernel FCLayer512to10Kernel;
 
 const int INPUT_DIM[] = {
 	3, 64,
@@ -87,6 +92,7 @@ const int NBYN[] = {
 	1
 };
 
+
 // 유틸리티 함수: OpenCL 소스 로드
 char* get_source_code(const char* file_name, size_t* len) {
 	FILE* file = fopen(file_name, "rb");
@@ -127,6 +133,7 @@ void build_error(cl_program program, cl_device_id device, cl_int err) {
 	};
 }
 
+// Initialize CNN
 void cnn_init() {
 	// Platform ID
 	Err = clGetPlatformIDs(1, &Platform, NULL);
@@ -141,7 +148,7 @@ void cnn_init() {
 	CHECK_ERROR(Err);
 
 	// Create Command Queue
-	Queue = clCreateCommandQueueWithProperties(Context, Device, 0, &Err);
+	Queue = clCreateCommandQueue(Context, Device, CL_QUEUE_PROFILING_ENABLE, &Err);
 	CHECK_ERROR(Err);
 
 	// Create Program Object
@@ -160,85 +167,121 @@ void cnn_init() {
 	ConvolutionKernel = clCreateKernel(program, "convolution", &Err);
 	CHECK_ERROR(Err);
 
-	FCLayerKernel = clCreateKernel(program, "fc_layer", &Err);
+	FCLayer512to512Kernel = clCreateKernel(program, "fc_layer_optimized_512_512", &Err);
+	CHECK_ERROR(Err);
+
+	FCLayer512to10Kernel = clCreateKernel(program, "fc_layer_optimized_512_10", &Err);
 	CHECK_ERROR(Err);
 
 	MaxPoolingKernel = clCreateKernel(program, "max_pooling", &Err);
 	CHECK_ERROR(Err);
 }
 
-void convolution_cl(float* inputs, float* outputs, float* filter, float* biases, int inDim, int outDim, int nbyn) {
-	size_t global_work_size[] = { (size_t)nbyn, (size_t)nbyn }; // 병렬 처리를 위한 워크 아이템 크기
 
-	size_t ls = nbyn < 16 ? nbyn : 16;
-	size_t local_work_size[] = { ls, ls }; // 워크 그룹 크기 (최적화 필요)
-
-	// ================== 버퍼 생성 ==================
-	cl_mem input_buffer = clCreateBuffer(
-		Context,
-		CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
-		sizeof(float) * inDim * nbyn * nbyn, inputs,
-		&Err
-	);
-	CHECK_ERROR(Err);
-
-	cl_mem filter_buffer = clCreateBuffer(
-		Context,
-		CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
-		sizeof(float) * inDim * outDim * 3 * 3, filter,
-		&Err
-	);
-	CHECK_ERROR(Err);
-
-	cl_mem bias_buffer = clCreateBuffer(
-		Context,
-		CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
-		sizeof(float) * outDim, biases,
-		&Err
-	);
-	CHECK_ERROR(Err);
-
-	cl_mem output_buffer = clCreateBuffer(
-		Context,
-		CL_MEM_WRITE_ONLY,
-		sizeof(float) * outDim * nbyn * nbyn,
-		NULL,
-		&Err
-	);
-	CHECK_ERROR(Err);
-
-	// ================== Kernel Arguments ==================
-	clSetKernelArg(ConvolutionKernel, 0, sizeof(cl_mem), &input_buffer);
-	clSetKernelArg(ConvolutionKernel, 1, sizeof(cl_mem), &output_buffer);
-	clSetKernelArg(ConvolutionKernel, 2, sizeof(cl_mem), &filter_buffer);
-	clSetKernelArg(ConvolutionKernel, 3, sizeof(cl_mem), &bias_buffer);
-	clSetKernelArg(ConvolutionKernel, 4, sizeof(int), &inDim);
-	clSetKernelArg(ConvolutionKernel, 5, sizeof(int), &outDim);
-	clSetKernelArg(ConvolutionKernel, 6, sizeof(int), &nbyn);
-
-	// ================== 실행하고 결과 받기 ==================
-	Err = clEnqueueNDRangeKernel(Queue, ConvolutionKernel, 2, NULL, global_work_size, local_work_size, 0, NULL, NULL);
-	CHECK_ERROR(Err);
-	Err = clEnqueueReadBuffer(Queue, output_buffer, CL_TRUE, 0,
-		sizeof(float) * outDim * nbyn * nbyn, outputs, 0, NULL, NULL);
-	CHECK_ERROR(Err);
-
-	Err = clFinish(Queue);
-	CHECK_ERROR(Err);
-
-	// ================== 메모리 해제 ==================
-	clReleaseMemObject(input_buffer);
-	clReleaseMemObject(filter_buffer);
-	clReleaseMemObject(bias_buffer);
-	clReleaseMemObject(output_buffer);
+// 이미지 크기에 따른 워크 그룹 동적 조정
+void adjust_work_group_size(int nbyn, size_t& local_size) {
+	if (nbyn < 4) {
+		local_size = 1;  // 매우 작은 이미지
+	}
+	else if (nbyn < 8) {
+		local_size = 2;
+	}
+	else if (nbyn < 16) {
+		local_size = 4;
+	}
+	else if (nbyn < 32) {
+		local_size = 8;
+	}
+	else {
+		local_size = 16;
+	}
 }
 
+
+// 컨볼루션 병렬화
+void convolution_cl(float* inputs, float* outputs, float* filter, float* biases, int inDim, int outDim, int nbyn) {
+	size_t global_work_size[2] = { (size_t)nbyn, (size_t)nbyn };
+
+	size_t l_size = 0;
+	adjust_work_group_size(nbyn, l_size);
+
+	size_t local_work_size[2] = { l_size, l_size };
+
+	// 버퍼 생성
+	cl_mem input_buffer = clCreateBuffer(Context, CL_MEM_READ_ONLY, sizeof(float) * inDim * nbyn * nbyn, NULL, &Err);
+	CHECK_ERROR(Err);
+
+	cl_mem output_buffer = clCreateBuffer(Context, CL_MEM_WRITE_ONLY, sizeof(float) * nbyn * nbyn, NULL, &Err);
+	CHECK_ERROR(Err);
+
+	cl_mem filter_buffer = clCreateBuffer(Context, CL_MEM_READ_ONLY, sizeof(float) * 3 * 3 * inDim, NULL, &Err);
+	CHECK_ERROR(Err);
+
+	cl_mem bias_buffer = clCreateBuffer(Context, CL_MEM_READ_ONLY, sizeof(float), NULL, &Err);
+	CHECK_ERROR(Err);
+
+	// 입력 데이터 버퍼에 복사 (반복문 밖에서 한 번만)
+	Err = clEnqueueWriteBuffer(Queue, input_buffer, CL_TRUE, 0, sizeof(float) * inDim * nbyn * nbyn, inputs, 0, NULL, NULL);
+	CHECK_ERROR(Err);
+
+	for (int cur_out = 0; cur_out < outDim; cur_out++) {
+		float* cur_output = outputs + cur_out * nbyn * nbyn;
+		float* cur_filter = filter + cur_out * 3 * 3 * inDim;
+		float* cur_bias = biases + cur_out; // 바이어스는 출력 채널당 하나의 값
+
+		// 필터와 바이어스 버퍼에 데이터 복사
+		Err = clEnqueueWriteBuffer(Queue, filter_buffer, CL_TRUE, 0, sizeof(float) * 3 * 3 * inDim, cur_filter, 0, NULL, NULL);
+		CHECK_ERROR(Err);
+
+		Err = clEnqueueWriteBuffer(Queue, bias_buffer, CL_TRUE, 0, sizeof(float), cur_bias, 0, NULL, NULL);
+		CHECK_ERROR(Err);
+
+		// 커널 인자 설정
+		Err = clSetKernelArg(ConvolutionKernel, 0, sizeof(cl_mem), &input_buffer);
+		CHECK_ERROR(Err);
+		Err = clSetKernelArg(ConvolutionKernel, 1, sizeof(cl_mem), &output_buffer);
+		CHECK_ERROR(Err);
+		Err = clSetKernelArg(ConvolutionKernel, 2, sizeof(cl_mem), &filter_buffer);
+		CHECK_ERROR(Err);
+		Err = clSetKernelArg(ConvolutionKernel, 3, sizeof(cl_mem), &bias_buffer);
+		CHECK_ERROR(Err);
+		Err = clSetKernelArg(ConvolutionKernel, 4, sizeof(int), &nbyn);
+		CHECK_ERROR(Err);
+		Err = clSetKernelArg(ConvolutionKernel, 5, sizeof(int), &inDim);
+		CHECK_ERROR(Err);
+
+		// 커널 실행
+		Err = clEnqueueNDRangeKernel(Queue, ConvolutionKernel, 2, NULL, global_work_size, local_work_size, 0, NULL, &read_event);
+		CHECK_ERROR(Err);
+
+		// 프로파일링 정보 수집
+		clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_START, sizeof(cl_ulong), &time_start, NULL);
+		clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_END, sizeof(cl_ulong), &time_end, NULL);
+		//printf("Convolution Layer Elapsed Time = %lu nsec\n", time_end - time_start);
+
+		// 이벤트 해제
+		clReleaseEvent(read_event);
+
+		// 결과 읽기
+		Err = clEnqueueReadBuffer(Queue, output_buffer, CL_TRUE, 0, sizeof(float) * nbyn * nbyn, cur_output, 0, NULL, NULL);
+		CHECK_ERROR(Err);
+	}
+
+	// 버퍼 해제
+	clReleaseMemObject(input_buffer);
+	clReleaseMemObject(output_buffer);
+	clReleaseMemObject(filter_buffer);
+	clReleaseMemObject(bias_buffer);
+}
+
+
+// Max Pooling 병렬화
 void max_pooling_cl(float* input, float* output, int dim, int nbyn) {
 
 	cl_mem input_buffer = clCreateBuffer(Context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, sizeof(float) * dim * nbyn * nbyn, input, &Err);
 	CHECK_ERROR(Err);
 
-	cl_mem output_buffer = clCreateBuffer(Context, CL_MEM_READ_WRITE, sizeof(float) * dim * nbyn * nbyn / 4, NULL, &Err);
+	cl_mem output_buffer = clCreateBuffer(Context, CL_MEM_READ_WRITE, sizeof(float) * dim * nbyn * nbyn / 4, nullptr, &Err);
 	CHECK_ERROR(Err);
 
 	// Set Kernel Args
@@ -250,32 +293,38 @@ void max_pooling_cl(float* input, float* output, int dim, int nbyn) {
 	CHECK_ERROR(Err);
 
 	// Set Work Size
-	size_t global_item_size[] = { (size_t)dim, (size_t)(nbyn * nbyn / 4) };
-	size_t local_item_size[] = { (size_t)nbyn / 2, (size_t)nbyn / 2 };
-
+	// { dim, nbn * nbyn / 4 }
+	// { nbyn / 2, nbyn / 2}
+	size_t global_item_size[] = { (size_t)dim, (size_t)(nbyn /2), (size_t)(nbyn /2) };
+	size_t local_item_size[] = { 1, (size_t)nbyn / 2, (size_t)nbyn / 2};
 	// Run Kernel
-	Err = clEnqueueNDRangeKernel(Queue, MaxPoolingKernel, 2, global_item_size, local_item_size, NULL, 0, NULL, NULL);
+	Err = clEnqueueNDRangeKernel(Queue, MaxPoolingKernel, 3, nullptr, global_item_size, local_item_size, 0, nullptr, &read_event);
 	CHECK_ERROR(Err);
 
-	Err = clEnqueueReadBuffer(Queue, output_buffer, CL_TRUE, 0, sizeof(float) * dim * nbyn * nbyn / 4, output, 0, NULL, NULL);
+	Err = clEnqueueReadBuffer(Queue, output_buffer, CL_TRUE, 0, sizeof(float) * dim * nbyn * nbyn / 4, output, 0, nullptr, nullptr);
 	CHECK_ERROR(Err);
 
 	Err = clFinish(Queue);
 	CHECK_ERROR(Err);
 
+	clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_START, sizeof(cl_ulong), &time_start, nullptr);
+	clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_END, sizeof(cl_ulong), &time_end, nullptr);
+	std::cout << "MaxPooling time: " << time_end - time_start << "ns" << std::endl;
+
 	// Release Memory
-	if (input_buffer != NULL) clReleaseMemObject(input_buffer);
-	if(output_buffer != NULL) clReleaseMemObject(output_buffer);
+	clReleaseMemObject(input_buffer);
+	clReleaseMemObject(output_buffer);
 }
 
-void fc_layer_cl(float* inputs, float* outputs, float* weights, float* biases, int inDim, int outDim) {
 
+//512입력차원에서 512출력차원으로 가는 완전연결신경망에 최적화된 커널을 호출
+void fc_layer_optimized_512_512(float* inputs, float* outputs, float* weights, float* biases, int inDim, int outDim) {
 	// ================== 버퍼 생성 ==================
 	cl_mem input_buffer = clCreateBuffer(Context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
 		sizeof(float) * inDim, inputs, &Err);
 	CHECK_ERROR(Err);
 
-	cl_mem output_buffer = clCreateBuffer(Context, CL_MEM_READ_WRITE,
+	cl_mem output_buffer = clCreateBuffer(Context, CL_MEM_WRITE_ONLY,
 		sizeof(float) * outDim, NULL, &Err);
 	CHECK_ERROR(Err);
 
@@ -287,20 +336,23 @@ void fc_layer_cl(float* inputs, float* outputs, float* weights, float* biases, i
 		sizeof(float) * outDim, biases, &Err);
 	CHECK_ERROR(Err);
 
-	int max = inDim > outDim ? inDim : outDim;
-	size_t global[2] = { (size_t)max, 1 };
+	size_t global[2] = { (size_t)outDim, 1 };
+	size_t local[2] = { (size_t)outDim / 32, 1 };
 
-	// ================== Kernel Arguments ==================
-	clSetKernelArg(FCLayerKernel, 0, sizeof(cl_mem), &input_buffer);
-	clSetKernelArg(FCLayerKernel, 1, sizeof(float) * inDim, NULL);
-	clSetKernelArg(FCLayerKernel, 2, sizeof(cl_mem), &output_buffer);
-	clSetKernelArg(FCLayerKernel, 3, sizeof(cl_mem), &weight_buffer);
-	clSetKernelArg(FCLayerKernel, 4, sizeof(cl_mem), &bias_buffer);
-	clSetKernelArg(FCLayerKernel, 5, sizeof(int), &inDim);
-	clSetKernelArg(FCLayerKernel, 6, sizeof(int), &outDim);
+	//32개 혹은 64개가 Nvidia GPU에 최적화되어 있는 워크 그룹의 개수이다
+	//글로벌 워크 사이즈가 512이고 목표로 하는 워크 그룹의 개수가 32개라면
+	//로컬 워크 사이즈는 512 / 32 = 16가 된다
+
+	// ================== 커널 매개변수 전달 ==================
+	clSetKernelArg(FCLayer512to512Kernel, 0, sizeof(cl_mem), &input_buffer);
+	clSetKernelArg(FCLayer512to512Kernel, 1, sizeof(cl_mem), &output_buffer);
+	clSetKernelArg(FCLayer512to512Kernel, 2, sizeof(cl_mem), &weight_buffer);
+	clSetKernelArg(FCLayer512to512Kernel, 3, sizeof(cl_mem), &bias_buffer);
+	clSetKernelArg(FCLayer512to512Kernel, 4, sizeof(int), &inDim);
+	clSetKernelArg(FCLayer512to512Kernel, 5, sizeof(int), &outDim);
 
 	// ================== 실행하고 결과 받기 ==================
-	Err = clEnqueueNDRangeKernel(Queue, FCLayerKernel, 1, NULL, global, NULL, 0, NULL, NULL);
+	Err = clEnqueueNDRangeKernel(Queue, FCLayer512to512Kernel, 1, NULL, global, local, 0, NULL, &read_event);
 	CHECK_ERROR(Err);
 
 	Err = clEnqueueReadBuffer(Queue, output_buffer, CL_TRUE, 0, sizeof(float) * outDim, outputs, 0, NULL, NULL);
@@ -309,12 +361,71 @@ void fc_layer_cl(float* inputs, float* outputs, float* weights, float* biases, i
 	Err = clFinish(Queue);
 	CHECK_ERROR(Err);
 
+	// ================== 프로파일링 ==================
+	clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_START, sizeof(cl_ulong), &time_start, NULL);
+	clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_END, sizeof(cl_ulong), &time_end, NULL);
+	printf("FCLayer Elapsed Time = %lu ns\n", time_end - time_start);
+
 	// ================== 메모리 해제 ==================
 	clReleaseMemObject(input_buffer);
 	clReleaseMemObject(output_buffer);
 	clReleaseMemObject(weight_buffer);
 	clReleaseMemObject(bias_buffer);
 }
+
+
+//512입력차원에서 10출력차원으로 가는 완전연결신경망에 최적화된 커널을 호출
+void fc_layer_optimized_512_10(float* inputs, float* outputs, float* weights, float* biases, int inDim, int outDim) {
+	// ================== 버퍼 생성 ==================
+	cl_mem input_buffer = clCreateBuffer(Context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+		sizeof(float) * inDim, inputs, &Err);
+	CHECK_ERROR(Err);
+
+	cl_mem output_buffer = clCreateBuffer(Context, CL_MEM_WRITE_ONLY,
+		sizeof(float) * outDim, NULL, &Err);
+	CHECK_ERROR(Err);
+
+	cl_mem weight_buffer = clCreateBuffer(Context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+		sizeof(float) * inDim * outDim, weights, &Err);
+	CHECK_ERROR(Err);
+
+	cl_mem bias_buffer = clCreateBuffer(Context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+		sizeof(float) * outDim, biases, &Err);
+	CHECK_ERROR(Err);
+
+	size_t global[2] = { (size_t)outDim, 1 };
+	size_t local[2] = { (size_t)outDim, 1 };
+
+	// ================== 커널 매개변수 전달 ==================
+	clSetKernelArg(FCLayer512to10Kernel, 0, sizeof(cl_mem), &input_buffer);\
+	clSetKernelArg(FCLayer512to10Kernel, 1, sizeof(cl_mem), &output_buffer);
+	clSetKernelArg(FCLayer512to10Kernel, 2, sizeof(cl_mem), &weight_buffer);
+	clSetKernelArg(FCLayer512to10Kernel, 3, sizeof(cl_mem), &bias_buffer);
+	clSetKernelArg(FCLayer512to10Kernel, 4, sizeof(int), &inDim);
+	clSetKernelArg(FCLayer512to10Kernel, 5, sizeof(int), &outDim);
+
+	// ================== 실행하고 결과 받기 ==================
+	Err = clEnqueueNDRangeKernel(Queue, FCLayer512to10Kernel, 1, NULL, global, local, 0, NULL, &read_event);
+	CHECK_ERROR(Err);
+
+	Err = clEnqueueReadBuffer(Queue, output_buffer, CL_TRUE, 0, sizeof(float) * outDim, outputs, 0, NULL, NULL);
+	CHECK_ERROR(Err);
+
+	Err = clFinish(Queue);
+	CHECK_ERROR(Err);
+
+	// ================== 프로파일링 ==================
+	clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_START, sizeof(cl_ulong), &time_start, NULL);
+	clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_END, sizeof(cl_ulong), &time_end, NULL);
+	printf("FCLayer Elapsed Time = %lu ns\n", time_end - time_start);
+
+	// ================== 메모리 해제 ==================
+	clReleaseMemObject(input_buffer);
+	clReleaseMemObject(output_buffer);
+	clReleaseMemObject(weight_buffer);
+	clReleaseMemObject(bias_buffer);
+}
+
 
 static void softmax_cl(float* input, int N) {
 	int i;
@@ -331,6 +442,7 @@ static void softmax_cl(float* input, int N) {
 	}
 }
 
+
 static int find_max_cl(float* input, int classNum) {
 	int i;
 	int maxIndex = 0;
@@ -344,9 +456,12 @@ static int find_max_cl(float* input, int classNum) {
 	return maxIndex;
 }
 
-void cnn(float* images, float* network, int* labels, float* confidences, int num_images) {
 
+//////////// CNN 메인 코드 /////////////
+void cnn(float* images, float* network, int* labels, float* confidences, int num_images) {
 	cnn_init();
+
+	std::cout << "Par allel" << std::endl;
 
 	float* w[21];
 	float* b[21];
@@ -405,9 +520,9 @@ void cnn(float* images, float* network, int* labels, float* confidences, int num
 		convolution_cl(layer[15], layer[16], w[16], b[16], INPUT_DIM[16], OUTPUT_DIM[16], NBYN[16]);
 		max_pooling_cl(layer[16], layer[17], INPUT_DIM[17], NBYN[17] * 2);
 
-		fc_layer_cl(layer[17], layer[18], w[18], b[18], INPUT_DIM[18], OUTPUT_DIM[18]);
-		fc_layer_cl(layer[18], layer[19], w[19], b[19], INPUT_DIM[19], OUTPUT_DIM[19]);
-		fc_layer_cl(layer[19], layer[20], w[20], b[20], INPUT_DIM[20], OUTPUT_DIM[20]);
+		fc_layer_optimized_512_512(layer[17], layer[18], w[18], b[18], INPUT_DIM[18], OUTPUT_DIM[18]);
+		fc_layer_optimized_512_512(layer[18], layer[19], w[19], b[19], INPUT_DIM[19], OUTPUT_DIM[19]);
+		fc_layer_optimized_512_10(layer[19], layer[20], w[20], b[20], INPUT_DIM[20], OUTPUT_DIM[20]);
 
 		softmax_cl(layer[20], 10);
 

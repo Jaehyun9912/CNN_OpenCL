@@ -62,7 +62,7 @@ int main(int argc, char** argv) {
 	float* confidences = (float*)malloc(sizeof(float) * num_of_image);
 
 
-	// cnn_seq(images, network, labels, confidences, num_of_image);
+	cnn_seq(images, network, labels, confidences, num_of_image);
 	cnn(images, network, labels, confidences, num_of_image);
 
 	
