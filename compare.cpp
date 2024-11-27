@@ -44,7 +44,7 @@ void compare(const char* filename, int num_of_image) {
 			exit(1);
 		}
 	}
-	printf("Good");
+	printf("\nGood\n");
 
 	free(correctClass);
 	free(yourClass);
