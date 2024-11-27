@@ -1,10 +1,13 @@
 #pragma warning(disable : 4996)
+#include <cfloat>
+
 #include "cnn.h"
 #include <ctime>
 #include <CL/cl.h>
 #include <cmath>
 #include <iostream>
 #include <fstream>
+#include <cstring>
 
 #define CHECK_ERROR(err) \
 	if(err != CL_SUCCESS) { \
@@ -17,11 +20,15 @@ cl_platform_id Platform;
 cl_device_id Device;
 cl_context Context;
 cl_command_queue Queue;
+cl_event Event;
+
+cl_ulong time_start, time_end;
 
 // kernels
 cl_kernel ConvolutionKernel;
-cl_kernel FCLayerKernel;
 cl_kernel MaxPoolingKernel;
+cl_kernel FCLayer512to512Kernel;
+cl_kernel FCLayer512to10Kernel;
 
 const int INPUT_DIM[] = {
 	3, 64,
@@ -141,7 +148,7 @@ void cnn_init() {
 	CHECK_ERROR(Err);
 
 	// Create Command Queue
-	Queue = clCreateCommandQueueWithProperties(Context, Device, 0, &Err);
+	Queue = clCreateCommandQueue(Context, Device, CL_QUEUE_PROFILING_ENABLE, &Err);
 	CHECK_ERROR(Err);
 
 	// Create Program Object
@@ -160,7 +167,10 @@ void cnn_init() {
 	ConvolutionKernel = clCreateKernel(program, "convolution", &Err);
 	CHECK_ERROR(Err);
 
-	FCLayerKernel = clCreateKernel(program, "fc_layer", &Err);
+	FCLayer512to512Kernel = clCreateKernel(program, "fc_layer_optimized_512_512", &Err);
+	CHECK_ERROR(Err);
+
+	FCLayer512to10Kernel = clCreateKernel(program, "fc_layer_optimized_512_10", &Err);
 	CHECK_ERROR(Err);
 
 	MaxPoolingKernel = clCreateKernel(program, "max_pooling", &Err);
@@ -169,9 +179,6 @@ void cnn_init() {
 
 void convolution_cl(float* inputs, float* outputs, float* filter, float* biases, int inDim, int outDim, int nbyn) {
 	size_t global_work_size[] = { (size_t)nbyn, (size_t)nbyn }; // 병렬 처리를 위한 워크 아이템 크기
-
-	size_t ls = nbyn < 16 ? nbyn : 16;
-	size_t local_work_size[] = { ls, ls }; // 워크 그룹 크기 (최적화 필요)
 
 	// ================== 버퍼 생성 ==================
 	cl_mem input_buffer = clCreateBuffer(
@@ -217,7 +224,7 @@ void convolution_cl(float* inputs, float* outputs, float* filter, float* biases,
 	clSetKernelArg(ConvolutionKernel, 6, sizeof(int), &nbyn);
 
 	// ================== 실행하고 결과 받기 ==================
-	Err = clEnqueueNDRangeKernel(Queue, ConvolutionKernel, 2, NULL, global_work_size, local_work_size, 0, NULL, NULL);
+	Err = clEnqueueNDRangeKernel(Queue, ConvolutionKernel, 2, NULL, global_work_size, NULL, 0, NULL, NULL);
 	CHECK_ERROR(Err);
 	Err = clEnqueueReadBuffer(Queue, output_buffer, CL_TRUE, 0,
 		sizeof(float) * outDim * nbyn * nbyn, outputs, 0, NULL, NULL);
@@ -233,12 +240,55 @@ void convolution_cl(float* inputs, float* outputs, float* filter, float* biases,
 	clReleaseMemObject(output_buffer);
 }
 
+static void convolution(float* inputs, float* outputs, float* filter, float* biases, int inDim, int outDim, int nbyn) {
+
+	memset(outputs, 0, nbyn * nbyn * outDim * sizeof(float));
+	int x = 0, y = 0;
+	int offset = nbyn * nbyn;
+	float sum = 0, temp;
+	float* input, * output;
+
+	for (int outNeuron = 0; outNeuron < outDim; ++outNeuron) {
+		input = inputs;
+		for (int inNeuron = 0; inNeuron < inDim; ++inNeuron) {
+			output = outputs;
+			for (int row = 0; row < nbyn; ++row) {
+				for (int col = 0; col < nbyn; ++col) {
+					sum = 0;
+					for (int fRow = 0; fRow < 3; ++fRow) {
+						for (int fCol = 0; fCol < 3; ++fCol) {
+							x = col + fCol - 1;
+							y = row + fRow - 1;
+
+							if (x >= 0 && x < nbyn && y >= 0 && y < nbyn) {
+								sum += input[nbyn * y + x] * filter[3 * fRow + fCol];
+							}
+
+						}
+					}
+					*(output++) += sum;
+				}
+			}
+			filter += 9;
+			input += offset;
+
+		}
+		for (int i = 0; i < offset; ++i) {
+			(*outputs) = (*outputs) + (*biases);
+			if (*outputs < 0) (*outputs) = 0;	//ReLU
+			outputs++;
+		}
+		++biases;
+	}
+
+}
+
 void max_pooling_cl(float* input, float* output, int dim, int nbyn) {
 
 	cl_mem input_buffer = clCreateBuffer(Context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, sizeof(float) * dim * nbyn * nbyn, input, &Err);
 	CHECK_ERROR(Err);
 
-	cl_mem output_buffer = clCreateBuffer(Context, CL_MEM_READ_WRITE, sizeof(float) * dim * nbyn * nbyn / 4, NULL, &Err);
+	cl_mem output_buffer = clCreateBuffer(Context, CL_MEM_READ_WRITE, sizeof(float) * dim * nbyn * nbyn / 4, nullptr, &Err);
 	CHECK_ERROR(Err);
 
 	// Set Kernel Args
@@ -250,32 +300,58 @@ void max_pooling_cl(float* input, float* output, int dim, int nbyn) {
 	CHECK_ERROR(Err);
 
 	// Set Work Size
-	size_t global_item_size[] = { (size_t)dim, (size_t)(nbyn * nbyn / 4) };
-	size_t local_item_size[] = { (size_t)nbyn / 2, (size_t)nbyn / 2 };
-
+	// { dim, nbn * nbyn / 4 }
+	// { nbyn / 2, nbyn / 2}
+	size_t global_item_size[] = { (size_t)dim, (size_t)(nbyn /2), (size_t)(nbyn /2) };
+	size_t local_item_size[] = { 1, (size_t)nbyn / 2, (size_t)nbyn / 2};
 	// Run Kernel
-	Err = clEnqueueNDRangeKernel(Queue, MaxPoolingKernel, 2, global_item_size, local_item_size, NULL, 0, NULL, NULL);
+	Err = clEnqueueNDRangeKernel(Queue, MaxPoolingKernel, 3, nullptr, global_item_size, local_item_size, 0, nullptr, &Event);
 	CHECK_ERROR(Err);
 
-	Err = clEnqueueReadBuffer(Queue, output_buffer, CL_TRUE, 0, sizeof(float) * dim * nbyn * nbyn / 4, output, 0, NULL, NULL);
+	Err = clEnqueueReadBuffer(Queue, output_buffer, CL_TRUE, 0, sizeof(float) * dim * nbyn * nbyn / 4, output, 0, nullptr, nullptr);
 	CHECK_ERROR(Err);
 
 	Err = clFinish(Queue);
 	CHECK_ERROR(Err);
 
+	clGetEventProfilingInfo(Event, CL_PROFILING_COMMAND_START, sizeof(cl_ulong), &time_start, nullptr);
+	clGetEventProfilingInfo(Event, CL_PROFILING_COMMAND_END, sizeof(cl_ulong), &time_end, nullptr);
+	std::cout << "MaxPooling time: " << time_end - time_start << "ns" << std::endl;
+
 	// Release Memory
-	if (input_buffer != NULL) clReleaseMemObject(input_buffer);
-	if(output_buffer != NULL) clReleaseMemObject(output_buffer);
+	clReleaseMemObject(input_buffer);
+	clReleaseMemObject(output_buffer);
 }
 
-void fc_layer_cl(float* inputs, float* outputs, float* weights, float* biases, int inDim, int outDim) {
+static void max_pooling(float* input, float* output, int DIM, int nbyn) {
+	float max,temp;
+	int n, row, col, x, y;
+	for (n = 0; n < DIM; ++n) {
+		for (row = 0; row < nbyn; row += 2) {
+			for (col = 0; col < nbyn; col += 2) {
+				//max = -FLT_MAX;
+				max = 0;
+				for (y = 0; y < 2; ++y) {
+					for (x = 0; x < 2; ++x) {
+						temp = input[nbyn * (row + y) + col + x];
+						if (max < temp) max = temp;
+					}
+				}
+				*(output++) = max;
+			}
+		}
+		input += nbyn * nbyn;
+	}
+}
 
+//512입력차원에서 512출력차원으로 가는 완전연결신경망에 최적화된 커널을 호출
+void fc_layer_optimized_512_512(float* inputs, float* outputs, float* weights, float* biases, int inDim, int outDim) {
 	// ================== 버퍼 생성 ==================
 	cl_mem input_buffer = clCreateBuffer(Context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
 		sizeof(float) * inDim, inputs, &Err);
 	CHECK_ERROR(Err);
 
-	cl_mem output_buffer = clCreateBuffer(Context, CL_MEM_READ_WRITE,
+	cl_mem output_buffer = clCreateBuffer(Context, CL_MEM_WRITE_ONLY,
 		sizeof(float) * outDim, NULL, &Err);
 	CHECK_ERROR(Err);
 
@@ -287,20 +363,23 @@ void fc_layer_cl(float* inputs, float* outputs, float* weights, float* biases, i
 		sizeof(float) * outDim, biases, &Err);
 	CHECK_ERROR(Err);
 
-	int max = inDim > outDim ? inDim : outDim;
-	size_t global[2] = { (size_t)max, 1 };
+	size_t global[2] = { (size_t)outDim, 1 };
+	size_t local[2] = { (size_t)outDim / 32, 1 };
 
-	// ================== Kernel Arguments ==================
-	clSetKernelArg(FCLayerKernel, 0, sizeof(cl_mem), &input_buffer);
-	clSetKernelArg(FCLayerKernel, 1, sizeof(float) * inDim, NULL);
-	clSetKernelArg(FCLayerKernel, 2, sizeof(cl_mem), &output_buffer);
-	clSetKernelArg(FCLayerKernel, 3, sizeof(cl_mem), &weight_buffer);
-	clSetKernelArg(FCLayerKernel, 4, sizeof(cl_mem), &bias_buffer);
-	clSetKernelArg(FCLayerKernel, 5, sizeof(int), &inDim);
-	clSetKernelArg(FCLayerKernel, 6, sizeof(int), &outDim);
+	//32개 혹은 64개가 Nvidia GPU에 최적화되어 있는 워크 그룹의 개수이다
+	//글로벌 워크 사이즈가 512이고 목표로 하는 워크 그룹의 개수가 32개라면
+	//로컬 워크 사이즈는 512 / 32 = 16가 된다
+
+	// ================== 커널 매개변수 전달 ==================
+	clSetKernelArg(FCLayer512to512Kernel, 0, sizeof(cl_mem), &input_buffer);
+	clSetKernelArg(FCLayer512to512Kernel, 1, sizeof(cl_mem), &output_buffer);
+	clSetKernelArg(FCLayer512to512Kernel, 2, sizeof(cl_mem), &weight_buffer);
+	clSetKernelArg(FCLayer512to512Kernel, 3, sizeof(cl_mem), &bias_buffer);
+	clSetKernelArg(FCLayer512to512Kernel, 4, sizeof(int), &inDim);
+	clSetKernelArg(FCLayer512to512Kernel, 5, sizeof(int), &outDim);
 
 	// ================== 실행하고 결과 받기 ==================
-	Err = clEnqueueNDRangeKernel(Queue, FCLayerKernel, 1, NULL, global, NULL, 0, NULL, NULL);
+	Err = clEnqueueNDRangeKernel(Queue, FCLayer512to512Kernel, 1, NULL, global, local, 0, NULL, &Event);
 	CHECK_ERROR(Err);
 
 	Err = clEnqueueReadBuffer(Queue, output_buffer, CL_TRUE, 0, sizeof(float) * outDim, outputs, 0, NULL, NULL);
@@ -309,11 +388,81 @@ void fc_layer_cl(float* inputs, float* outputs, float* weights, float* biases, i
 	Err = clFinish(Queue);
 	CHECK_ERROR(Err);
 
+	// ================== 프로파일링 ==================
+	clGetEventProfilingInfo(Event, CL_PROFILING_COMMAND_START, sizeof(cl_ulong), &time_start, NULL);
+	clGetEventProfilingInfo(Event, CL_PROFILING_COMMAND_END, sizeof(cl_ulong), &time_end, NULL);
+	printf("FCLayer Elapsed Time = %lu ns\n", time_end - time_start);
+
 	// ================== 메모리 해제 ==================
 	clReleaseMemObject(input_buffer);
 	clReleaseMemObject(output_buffer);
 	clReleaseMemObject(weight_buffer);
 	clReleaseMemObject(bias_buffer);
+}
+
+//512입력차원에서 10출력차원으로 가는 완전연결신경망에 최적화된 커널을 호출
+void fc_layer_optimized_512_10(float* inputs, float* outputs, float* weights, float* biases, int inDim, int outDim) {
+	// ================== 버퍼 생성 ==================
+	cl_mem input_buffer = clCreateBuffer(Context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+		sizeof(float) * inDim, inputs, &Err);
+	CHECK_ERROR(Err);
+
+	cl_mem output_buffer = clCreateBuffer(Context, CL_MEM_WRITE_ONLY,
+		sizeof(float) * outDim, NULL, &Err);
+	CHECK_ERROR(Err);
+
+	cl_mem weight_buffer = clCreateBuffer(Context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+		sizeof(float) * inDim * outDim, weights, &Err);
+	CHECK_ERROR(Err);
+
+	cl_mem bias_buffer = clCreateBuffer(Context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+		sizeof(float) * outDim, biases, &Err);
+	CHECK_ERROR(Err);
+
+	size_t global[2] = { (size_t)outDim, 1 };
+	size_t local[2] = { (size_t)outDim, 1 };
+
+	// ================== 커널 매개변수 전달 ==================
+	clSetKernelArg(FCLayer512to10Kernel, 0, sizeof(cl_mem), &input_buffer);\
+	clSetKernelArg(FCLayer512to10Kernel, 1, sizeof(cl_mem), &output_buffer);
+	clSetKernelArg(FCLayer512to10Kernel, 2, sizeof(cl_mem), &weight_buffer);
+	clSetKernelArg(FCLayer512to10Kernel, 3, sizeof(cl_mem), &bias_buffer);
+	clSetKernelArg(FCLayer512to10Kernel, 4, sizeof(int), &inDim);
+	clSetKernelArg(FCLayer512to10Kernel, 5, sizeof(int), &outDim);
+
+	// ================== 실행하고 결과 받기 ==================
+	Err = clEnqueueNDRangeKernel(Queue, FCLayer512to10Kernel, 1, NULL, global, local, 0, NULL, &Event);
+	CHECK_ERROR(Err);
+
+	Err = clEnqueueReadBuffer(Queue, output_buffer, CL_TRUE, 0, sizeof(float) * outDim, outputs, 0, NULL, NULL);
+	CHECK_ERROR(Err);
+
+	Err = clFinish(Queue);
+	CHECK_ERROR(Err);
+
+	// ================== 프로파일링 ==================
+	clGetEventProfilingInfo(Event, CL_PROFILING_COMMAND_START, sizeof(cl_ulong), &time_start, NULL);
+	clGetEventProfilingInfo(Event, CL_PROFILING_COMMAND_END, sizeof(cl_ulong), &time_end, NULL);
+	printf("FCLayer Elapsed Time = %lu ns\n", time_end - time_start);
+
+	// ================== 메모리 해제 ==================
+	clReleaseMemObject(input_buffer);
+	clReleaseMemObject(output_buffer);
+	clReleaseMemObject(weight_buffer);
+	clReleaseMemObject(bias_buffer);
+}
+
+void fc_layer(float* input, float* output, float* weights, float* biases, int inDim, int outDim) {
+	float sum;
+	for (int outNeuron = 0; outNeuron < outDim; ++outNeuron) {
+		sum = 0;
+		for (int inNeuron = 0; inNeuron < inDim; ++inNeuron) {
+			sum += input[inNeuron] * (*weights++);
+		}
+		sum += biases[outNeuron];
+		if (sum > 0) output[outNeuron] = sum;	//ReLU
+		else output[outNeuron] = 0;
+	}
 }
 
 static void softmax_cl(float* input, int N) {
@@ -382,32 +531,32 @@ void cnn(float* images, float* network, int* labels, float* confidences, int num
 
 	// run network
 	for (int i = 0; i < num_images; ++i) {
-		convolution_cl(images, layer[0], w[0], b[0], INPUT_DIM[0], OUTPUT_DIM[0], NBYN[0]);
-		convolution_cl(layer[0], layer[1], w[1], b[1], INPUT_DIM[1], OUTPUT_DIM[1], NBYN[1]);
+		convolution(images, layer[0], w[0], b[0], INPUT_DIM[0], OUTPUT_DIM[0], NBYN[0]);
+		convolution(layer[0], layer[1], w[1], b[1], INPUT_DIM[1], OUTPUT_DIM[1], NBYN[1]);
 		max_pooling_cl(layer[1], layer[2], INPUT_DIM[2], NBYN[2] * 2);
 
-		convolution_cl(layer[2], layer[3], w[3], b[3], INPUT_DIM[3], OUTPUT_DIM[3], NBYN[3]);
-		convolution_cl(layer[3], layer[4], w[4], b[4], INPUT_DIM[4], OUTPUT_DIM[4], NBYN[4]);
+		convolution(layer[2], layer[3], w[3], b[3], INPUT_DIM[3], OUTPUT_DIM[3], NBYN[3]);
+		convolution(layer[3], layer[4], w[4], b[4], INPUT_DIM[4], OUTPUT_DIM[4], NBYN[4]);
 		max_pooling_cl(layer[4], layer[5], INPUT_DIM[5], NBYN[5] * 2);
 
-		convolution_cl(layer[5], layer[6], w[6], b[6], INPUT_DIM[6], OUTPUT_DIM[6], NBYN[6]);
-		convolution_cl(layer[6], layer[7], w[7], b[7], INPUT_DIM[7], OUTPUT_DIM[7], NBYN[7]);
-		convolution_cl(layer[7], layer[8], w[8], b[8], INPUT_DIM[8], OUTPUT_DIM[8], NBYN[8]);
+		convolution(layer[5], layer[6], w[6], b[6], INPUT_DIM[6], OUTPUT_DIM[6], NBYN[6]);
+		convolution(layer[6], layer[7], w[7], b[7], INPUT_DIM[7], OUTPUT_DIM[7], NBYN[7]);
+		convolution(layer[7], layer[8], w[8], b[8], INPUT_DIM[8], OUTPUT_DIM[8], NBYN[8]);
 		max_pooling_cl(layer[8], layer[9], INPUT_DIM[9], NBYN[9] * 2);
 
-		convolution_cl(layer[9], layer[10], w[10], b[10], INPUT_DIM[10], OUTPUT_DIM[10], NBYN[10]);
-		convolution_cl(layer[10], layer[11], w[11], b[11], INPUT_DIM[11], OUTPUT_DIM[11], NBYN[11]);
-		convolution_cl(layer[11], layer[12], w[12], b[12], INPUT_DIM[12], OUTPUT_DIM[12], NBYN[12]);
+		convolution(layer[9], layer[10], w[10], b[10], INPUT_DIM[10], OUTPUT_DIM[10], NBYN[10]);
+		convolution(layer[10], layer[11], w[11], b[11], INPUT_DIM[11], OUTPUT_DIM[11], NBYN[11]);
+		convolution(layer[11], layer[12], w[12], b[12], INPUT_DIM[12], OUTPUT_DIM[12], NBYN[12]);
 		max_pooling_cl(layer[12], layer[13], INPUT_DIM[13], NBYN[13] * 2);
 
-		convolution_cl(layer[13], layer[14], w[14], b[14], INPUT_DIM[14], OUTPUT_DIM[14], NBYN[14]);
-		convolution_cl(layer[14], layer[15], w[15], b[15], INPUT_DIM[15], OUTPUT_DIM[15], NBYN[15]);
-		convolution_cl(layer[15], layer[16], w[16], b[16], INPUT_DIM[16], OUTPUT_DIM[16], NBYN[16]);
+		convolution(layer[13], layer[14], w[14], b[14], INPUT_DIM[14], OUTPUT_DIM[14], NBYN[14]);
+		convolution(layer[14], layer[15], w[15], b[15], INPUT_DIM[15], OUTPUT_DIM[15], NBYN[15]);
+		convolution(layer[15], layer[16], w[16], b[16], INPUT_DIM[16], OUTPUT_DIM[16], NBYN[16]);
 		max_pooling_cl(layer[16], layer[17], INPUT_DIM[17], NBYN[17] * 2);
 
-		fc_layer_cl(layer[17], layer[18], w[18], b[18], INPUT_DIM[18], OUTPUT_DIM[18]);
-		fc_layer_cl(layer[18], layer[19], w[19], b[19], INPUT_DIM[19], OUTPUT_DIM[19]);
-		fc_layer_cl(layer[19], layer[20], w[20], b[20], INPUT_DIM[20], OUTPUT_DIM[20]);
+		fc_layer_optimized_512_512(layer[17], layer[18], w[18], b[18], INPUT_DIM[18], OUTPUT_DIM[18]);
+		fc_layer_optimized_512_512(layer[18], layer[19], w[19], b[19], INPUT_DIM[19], OUTPUT_DIM[19]);
+		fc_layer_optimized_512_10(layer[19], layer[20], w[20], b[20], INPUT_DIM[20], OUTPUT_DIM[20]);
 
 		softmax_cl(layer[20], 10);
 

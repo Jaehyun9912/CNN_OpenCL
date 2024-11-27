@@ -52,87 +52,108 @@ __kernel void convolution(
 	}
 }
 
-__kernel void fc_layer(
-	__global float* global_input,
-	__local float* local_input,
-	__global float* global_output,
+__kernel void fc_layer_optimized_512_512(
+	__global const float* inputs,
+	__global float* outputs,
+	__global const float* weights,
+	__global const float* biases,
+	const int inDim,
+	const int outDim
+) {
+	// 로컬 메모리 선언 (워크그룹 내 공유 메모리)
+	__local float local_inputs[512];
+
+	//글로벌 인덱스는 0부터 511까지의 값을 가지게 된다
+	int output_id = get_global_id(0);
+
+	//로컬 인덱스는 0부터 로컬 사이즈까지의 값을 가지게 된다
+	//이 알고리즘에서는 사실상 0부터 15까지의 값을 가지게 된다
+	int local_id = get_local_id(0);
+
+	//로컬 사이즈는 최적의 워크 그룹 개수 32개에 따라서 값을 가지게 된다
+	//이 알고리즘에서는 사실상 512 / 32 = 16의 크기를 가지게 된다
+	int local_size = get_local_size(0);
+
+	//32개의 워크 그룹에는 0부터 15까지의 로컬 인덱스를 가지는 워크 아이템들이 있다
+	//로컬 인덱스 00번은 for문을 돌면서 글로벌 메모리 00-16-32-48 ... 496를 로컬 메모리에 복사하고
+	//로컬 인덱스 01번은 for문을 돌면서 글로벌 메모리 01-17-33-49 ... 497를 로컬 메모리에 복사하고
+	//로컬 인덱스 02번은 for문을 돌면서 글로벌 메모리 02-18-34-50 ... 498를 로컬 메모리에 복사하고
+	//...
+	//로컬 인덱스 13번은 for문을 돌면서 글로벌 메모리 13-29-45-61 ... 509를 로컬 메모리에 복사하고
+	//로컬 인덱스 14번은 for문을 돌면서 글로벌 메모리 14-30-46-62 ... 510를 로컬 메모리에 복사하고
+	//로컬 인덱스 15번은 for문을 돌면서 글로벌 메모리 15-31-47-63 ... 511를 로컬 메모리에 복사하고
+	for (int i = local_id; i < inDim; i += local_size)
+		local_inputs[i] = inputs[i];
+	barrier(CLK_LOCAL_MEM_FENCE);
+
+	//이 시점에서 각 워크 그룹의 로컬 메모리에는 글로벌 메모리의 입력뉴런 값이 저장되어 있다
+	//글로벌 메모리만 사용했을 경우 512x512=262,144번의 글로벌 메모리 접근이 필요했지만
+	//32개의 워크 그룹으로 분할되어 512*32=16,384번의 글로벌 메모리 접근만 필요하게 된다
+	//워크 그룹 또한 Nvidia GPU에서 적절한 코어 숫자인 32개로 되어 있어 성능을 최대한 끌어낸다
+
+	//로컬 메모리에 접근하여 완전연결레이어 연산을 수행한다
+	float sum = 0.0f;
+	for (int i = 0; i < inDim; i++)
+		sum += local_inputs[i] * weights[output_id * inDim + i];
+	sum += biases[output_id];
+	outputs[output_id] = max(sum, 0.0f);
+}
+
+__kernel void fc_layer_optimized_512_10(
+	__global float* inputs,
+	__global float* outputs,
 	__global float* weights,
 	__global float* biases,
 	int inDim,
 	int outDim
 ) {
+	__local float local_inputs[512];
 
-	//global_input 글로벌메모리의 입력뉴런
-	//local_input 로컬메모리의 입력뉴런
-	//global_output 출력뉴런의 값을 적는 글로벌메모리
-	//weight 글로벌메모리의 가중치
-	//biases 글로벌메모리의 편차
-	//inDim 입력 차원의 크기
-	//outDim 출력 차원의 크기
+	//워크 그룹의 크기를 출력뉴런의 차원과 일치시켰다
+	//따라서 워크 그룹의 크기는 10이고 개수는 1개가 된다
+	int global_id = get_global_id(0);
+	int local_id = get_local_id(0);
+	int local_size = get_local_size(0);
 
-	//1.
-	//주어진 신경망에서 완전연결레이어는 inDim개 입력뉴런과 outDim개 출력뉴런으로 구성된다
-	//각 출력뉴런은 자신의 값을 구하기 위해서 inDim개의 입력뉴런의 값을 매번 읽어야 한다
-	//하지만 입력뉴런의 값은 동일하므로 글로벌 메모리에 계속 들고 있다면 오버헤드가 발생한다
-	//따라서 글로벌메모리에 있는 입력뉴런을 로컬메모리인 local_input으로 복사한다
-
-	//2.
-	//가중치의 경우 출력 뉴런이 각 간선을 공유하지는 않으므로 어차피 1번 접근하게 됨
-	//바이어스의 경우 각 출력 뉴런이 하나씩 가지고 있으므로 어차피 1번 접근하게 됨
-	//따라서 로컬메모리에 복사하더라도 이득이 없다
-
-	//워크아이템은 Max(inDim, outDim)만큼 존재한다
-
-	//입력 뉴런의 id를 얻는다
-	int gid = get_global_id(0);
-
-	//입력차원만큼 로컬메모리에 로드해야 한다 - 그 외는 로드할 필요 없음
-	if (gid < inDim)
-	{
-		//각자 입력뉴런의 값을 글로벌메모리에서 로드하여 로컬메모리에 로드한다
-		local_input[gid] = global_input[gid];
-	}
-
-	//모든 워크아이템이 로컬메모리 로드를 복사를 완료할 때까지 대기한다
+	//1개의 워크 그룹에는 0부터 9까지의 로컬 인덱스를 가지는 워크 아이템들이 있으며 이게 전부다
+	//로컬 인덱스 00번은 for문을 돌면서 글로벌 메모리 00-10-20-30 ... 500 510를 로컬 메모리에 복사하고
+	//로컬 인덱스 01번은 for문을 돌면서 글로벌 메모리 01-11-21-31 ... 501 511를 로컬 메모리에 복사하고
+	//로컬 인덱스 02번은 for문을 돌면서 글로벌 메모리 02-12-22-32 ... 502 xxx를 로컬 메모리에 복사하고
+	//...
+	//로컬 인덱스 07번은 for문을 돌면서 글로벌 메모리 07-17-27-37 ... 507 xxx를 로컬 메모리에 복사하고
+	//로컬 인덱스 08번은 for문을 돌면서 글로벌 메모리 08-30-46-62 ... 508 xxx를 로컬 메모리에 복사하고
+	//로컬 인덱스 09번은 for문을 돌면서 글로벌 메모리 09-31-47-63 ... 509 xxx를 로컬 메모리에 복사하고
+	for (int i = global_id; i < inDim; i += local_size)
+		local_inputs[i] = inputs[i];
 	barrier(CLK_LOCAL_MEM_FENCE);
 
-	//이제 로컬메모리에 inDim개의 입력뉴런의 값이 전부 복사되어 있다
-
-	//출력차원만큼 연산이 이루어진다 - 그 외는 연산할 필요 없음
-	if (gid >= outDim)
-		return;
-
-	//출력뉴런에 따라서 입력뉴런과 이루는 간선의 가중치가 달라진다
 	float sum = 0.0f;
-	for (int i = 0; i < inDim; ++i)
-		sum += local_input[i] * weights[gid * inDim + i];
-
-	//출력뉴런의 편차 적용
-	sum += biases[gid];
-
-	//활성화 함수 적용
-	if (sum > 0) global_output[gid] = sum;
-	else global_output[gid] = 0;
+	for (int i = 0; i < inDim; i++)
+		sum += local_inputs[i] * weights[global_id * inDim + i];
+	sum += biases[global_id];
+	outputs[global_id] = max(sum, 0.0f);
 }
 
-const int STRIDE = 2;
 
 __kernel void max_pooling(
 	__global float* input,
 	__global float* output,
-	int nbyn
-) {
-	int dim = get_global_id(0);
-	int row = get_local_id(0);
-	int col = get_local_id(1);
+	int nbyn)
+{
+	//채널
+	int dim = get_group_id(0);
+
+	int row = get_local_id(1);
+	int col = get_local_id(2);
 
 	float max = -FLT_MAX;
-	for (int y = 0; y < STRIDE; y++) {
-		for (int x = 0; x < STRIDE; x++) {
-			float temp = input[nbyn * (row + y) + col + x];
-			if (max < temp) max = temp;
+	for (int y = 0; y < 2; y++) {
+		for (int x = 0; x < 2; x++) {
+			float temp = input[(nbyn * nbyn * dim) + nbyn * (2 * row + y) + 2 * col + x];
+			if (max < temp)
+				max = temp;
 		}
 	}
 
-	output[(dim * nbyn * nbyn) + (nbyn * row + col)] = max;
+	output[(dim * nbyn / 2 * nbyn / 2) + (row * nbyn / 2) + col] = max;
 }
