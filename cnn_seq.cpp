@@ -74,6 +74,7 @@ static void max_pooling(float* input, float* output, int DIM, int nbyn) {
 	}
 }
 
+
 void fc_layer(float* input, float* output, float* weights, float* biases, int inDim, int outDim) {
 	float sum;
 	for (int outNeuron = 0; outNeuron < outDim; ++outNeuron) {

@@ -137,6 +137,7 @@ __kernel void fc_layer_optimized_512_10(
 	outputs[global_id] = max(sum, 0.0f);
 }
 
+const int STRIDE = 2;
 
 __kernel void max_pooling(
 	__global float* input,

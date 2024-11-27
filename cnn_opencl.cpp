@@ -1,11 +1,10 @@
 #pragma warning(disable : 4996)
 #include "cnn.h"
-#include <CL/cl.h>
 #include <ctime>
+#include <CL/cl.h>
 #include <cmath>
-#include <cstring>
-#include <fstream>
 #include <iostream>
+#include <fstream>
 
 #define CHECK_ERROR(err) \
 	if(err != CL_SUCCESS) { \
@@ -13,7 +12,6 @@
 		exit(EXIT_FAILURE); \
 	}
 
-// CL variables
 cl_int Err;
 cl_platform_id Platform;
 cl_device_id Device;
@@ -24,6 +22,7 @@ cl_ulong time_start, time_end;
 
 // kernels
 cl_kernel ConvolutionKernel;
+cl_kernel FCLayerKernel;
 cl_kernel MaxPoolingKernel;
 cl_kernel FCLayer512to512Kernel;
 cl_kernel FCLayer512to10Kernel;
@@ -272,6 +271,7 @@ void convolution_cl(float* inputs, float* outputs, float* filter, float* biases,
 	clReleaseMemObject(output_buffer);
 	clReleaseMemObject(filter_buffer);
 	clReleaseMemObject(bias_buffer);
+	clReleaseMemObject(output_buffer);
 }
 
 
@@ -281,7 +281,7 @@ void max_pooling_cl(float* input, float* output, int dim, int nbyn) {
 	cl_mem input_buffer = clCreateBuffer(Context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, sizeof(float) * dim * nbyn * nbyn, input, &Err);
 	CHECK_ERROR(Err);
 
-	cl_mem output_buffer = clCreateBuffer(Context, CL_MEM_READ_WRITE, sizeof(float) * dim * nbyn * nbyn / 4, nullptr, &Err);
+	cl_mem output_buffer = clCreateBuffer(Context, CL_MEM_READ_WRITE, sizeof(float) * dim * nbyn * nbyn / 4, NULL, &Err);
 	CHECK_ERROR(Err);
 
 	// Set Kernel Args
@@ -459,9 +459,10 @@ static int find_max_cl(float* input, int classNum) {
 
 //////////// CNN 메인 코드 /////////////
 void cnn(float* images, float* network, int* labels, float* confidences, int num_images) {
+
 	cnn_init();
 
-	std::cout << "Par allel" << std::endl;
+	std::cout << "Parallel" << std::endl;
 
 	float* w[21];
 	float* b[21];
