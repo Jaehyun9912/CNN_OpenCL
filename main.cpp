@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <cmath>
 #include "cnn.h"
 
 const char* CLASS_NAME[] = {
@@ -62,7 +63,7 @@ int main(int argc, char** argv) {
 	float* confidences = (float*)malloc(sizeof(float) * num_of_image);
 
 
-	cnn_seq(images, network, labels, confidences, num_of_image);
+	// cnn_seq(images, network, labels, confidences, num_of_image);
 	cnn(images, network, labels, confidences, num_of_image);
 
 	
