@@ -1,4 +1,4 @@
-const int MAX_TILE_SIZE = 16;
+const int MAX_TILE_SIZE = 32;
 
 __kernel
 void convolution(
@@ -7,52 +7,51 @@ void convolution(
 	__global const float* filter,
 	__global const float* bias,
 	const int nbyn,
-	const int inDim
+	const int inDim,
+	const int outDim
 ) {
-	int i = get_global_id(0);
-	int j = get_global_id(1);
+	int o = get_global_id(0); // 출력 채널 인덱스
+	int i = get_global_id(1);
+	int j = get_global_id(2);
 
-	int padding = 1;
-	int nbyn_padded = nbyn + 2 * padding;
-
-	__local float local_input[MAX_TILE_SIZE + 2][MAX_TILE_SIZE + 2];
-	__local float local_filter[3][3];
-
-	for (int y = 0; y < 3; y++) {
-		for (int x = 0; x < 3; x++) {
-
-		}
-	}
-
-	if (i >= nbyn || j >= nbyn) {
+	if (o >= outDim || i >= nbyn || j >= nbyn) {
 		return;
 	}
 
 	float sum = 0.0f;
+
 	for (int dim = 0; dim < inDim; dim++) {
-		int offset = dim * nbyn * nbyn;
-		int offset_filter = dim * 9;
+		int input_offset = dim * nbyn * nbyn;
+		int filter_offset = (o * inDim + dim) * 9; // 필터 인덱스 계산
 
 		for (int filter_i = -1; filter_i <= 1; filter_i++) {
 			for (int filter_j = -1; filter_j <= 1; filter_j++) {
 				int input_i = i + filter_i;
 				int input_j = j + filter_j;
 
-				// Boundary check
+				// Zero-padding 처리
+				float input_value = 0.0f;
 				if (input_i >= 0 && input_i < nbyn && input_j >= 0 && input_j < nbyn) {
-					int filter_index = (filter_i + 1) * 3 + (filter_j + 1) + offset_filter;
-					int input_index = nbyn * input_i + input_j + offset;
-					sum += input[input_index] * filter[filter_index];
+					int input_index = input_offset + input_i * nbyn + input_j;
+					input_value = input[input_index];
 				}
+
+				int filter_index = filter_offset + (filter_i + 1) * 3 + (filter_j + 1);
+				float filter_value = filter[filter_index];
+
+				sum += input_value * filter_value;
 			}
 		}
 	}
 
-	// Add bias (assuming bias is per output channel)
-	sum += bias[0]; // Adjust as necessary for multiple output channels
+	// 바이어스 추가
+	sum += bias[o];
 
-	// Apply ReLU activation function
-	output[nbyn * i + j] = fmax(sum, 0.0f);
+	// ReLU 활성화 함수 적용
+	sum = fmax(sum, 0.0f);
+
+	int output_index = o * nbyn * nbyn + i * nbyn + j;
+	output[output_index] = sum;
 }
 
 
@@ -138,8 +137,10 @@ __kernel void fc_layer_optimized_512_10(
 	outputs[global_id] = max(sum, 0.0f);
 }
 
+const int STRIDE = 2;
 
-__kernel void max_pooling(
+__kernel
+void max_pooling(
 	__global float* input,
 	__global float* output,
 	int nbyn)
