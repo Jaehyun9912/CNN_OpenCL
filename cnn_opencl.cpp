@@ -16,7 +16,7 @@
 
 #define BATCH_SIZE (60)
 
-#define DEBUG (0)
+#define DEBUG (1)
 
 cl_int Err;
 cl_platform_id Platform;
@@ -152,7 +152,7 @@ void cnn_init() {
 	CHECK_ERROR(Err);
 
 	// Create Command Queue
-	cl_command_queue_properties properties[] = { CL_QUEUE_PROFILING_ENABLE, 0 };
+	cl_command_queue_properties properties[] = { CL_QUEUE_PROPERTIES, CL_QUEUE_PROFILING_ENABLE, 0 };
 	Queue = clCreateCommandQueueWithProperties(Context, Device, properties, &Err);
 	CHECK_ERROR(Err);
 
@@ -229,15 +229,13 @@ void convolution(cl_mem inLayer, cl_mem outLayer, float* filter, float* biases, 
 
 	// ================== 프로파일링 ==================
 	clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_START, sizeof(cl_ulong), &time_start, NULL);
+	clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_END, sizeof(cl_ulong), &time_end, NULL);
+	if (DEBUG) printf("Convolution Layer Elapsed Time = %lu nsec\n", time_end - time_start);
 
 	// ================== 메모리 해제 ==================
 	clReleaseMemObject(filter_buffer);
 	clReleaseMemObject(bias_buffer);
 	clReleaseMemObject(convolution_buffer);
-
-	// ================== 프로파일링 ==================
-	clGetEventProfilingInfo(read_event, CL_PROFILING_COMMAND_END, sizeof(cl_ulong), &time_end, NULL);
-	if (DEBUG) printf("Convolution Layer Elapsed Time = %lu nsec\n", time_end - time_start);
 }
 
 
