@@ -1,164 +1,156 @@
-const int MAX_TILE_SIZE = 32;
+const int FILTER_OFFSET = 9;
 
-__kernel
-void convolution(
-	__global const float* input,
-	__global float* output,
-	__global const float* filter,
-	__global const float* bias,
-	const int nbyn,
-	const int inDim,
-	const int outDim
-) {
-	int o = get_global_id(0); // 출력 채널 인덱스
-	int i = get_global_id(1);
-	int j = get_global_id(2);
-
-	if (o >= outDim || i >= nbyn || j >= nbyn) {
-		return;
-	}
-
-	float sum = 0.0f;
-
-	for (int dim = 0; dim < inDim; dim++) {
-		int input_offset = dim * nbyn * nbyn;
-		int filter_offset = (o * inDim + dim) * 9; // 필터 인덱스 계산
-
-		for (int filter_i = -1; filter_i <= 1; filter_i++) {
-			for (int filter_j = -1; filter_j <= 1; filter_j++) {
-				int input_i = i + filter_i;
-				int input_j = j + filter_j;
-
-				// Zero-padding 처리
-				float input_value = 0.0f;
-				if (input_i >= 0 && input_i < nbyn && input_j >= 0 && input_j < nbyn) {
-					int input_index = input_offset + input_i * nbyn + input_j;
-					input_value = input[input_index];
-				}
-
-				int filter_index = filter_offset + (filter_i + 1) * 3 + (filter_j + 1);
-				float filter_value = filter[filter_index];
-
-				sum += input_value * filter_value;
-			}
-		}
-	}
-
-	// 바이어스 추가
-	sum += bias[o];
-
-	// ReLU 활성화 함수 적용
-	sum = fmax(sum, 0.0f);
-
-	int output_index = o * nbyn * nbyn + i * nbyn + j;
-	output[output_index] = sum;
-}
-
-
-__kernel void fc_layer_optimized_512_512(
-	__global const float* inputs,
-	__global float* outputs,
-	__global const float* weights,
-	__global const float* biases,
-	const int inDim,
-	const int outDim
-) {
-	// 로컬 메모리 선언 (워크그룹 내 공유 메모리)
-	__local float local_inputs[512];
-
-	//글로벌 인덱스는 0부터 511까지의 값을 가지게 된다
-	int output_id = get_global_id(0);
-
-	//로컬 인덱스는 0부터 로컬 사이즈까지의 값을 가지게 된다
-	//이 알고리즘에서는 사실상 0부터 15까지의 값을 가지게 된다
-	int local_id = get_local_id(0);
-
-	//로컬 사이즈는 최적의 워크 그룹 개수 32개에 따라서 값을 가지게 된다
-	//이 알고리즘에서는 사실상 512 / 32 = 16의 크기를 가지게 된다
-	int local_size = get_local_size(0);
-
-	//32개의 워크 그룹에는 0부터 15까지의 로컬 인덱스를 가지는 워크 아이템들이 있다
-	//로컬 인덱스 00번은 for문을 돌면서 글로벌 메모리 00-16-32-48 ... 496를 로컬 메모리에 복사하고
-	//로컬 인덱스 01번은 for문을 돌면서 글로벌 메모리 01-17-33-49 ... 497를 로컬 메모리에 복사하고
-	//로컬 인덱스 02번은 for문을 돌면서 글로벌 메모리 02-18-34-50 ... 498를 로컬 메모리에 복사하고
-	//...
-	//로컬 인덱스 13번은 for문을 돌면서 글로벌 메모리 13-29-45-61 ... 509를 로컬 메모리에 복사하고
-	//로컬 인덱스 14번은 for문을 돌면서 글로벌 메모리 14-30-46-62 ... 510를 로컬 메모리에 복사하고
-	//로컬 인덱스 15번은 for문을 돌면서 글로벌 메모리 15-31-47-63 ... 511를 로컬 메모리에 복사하고
-	for (int i = local_id; i < inDim; i += local_size)
-		local_inputs[i] = inputs[i];
-	barrier(CLK_LOCAL_MEM_FENCE);
-
-	//이 시점에서 각 워크 그룹의 로컬 메모리에는 글로벌 메모리의 입력뉴런 값이 저장되어 있다
-	//글로벌 메모리만 사용했을 경우 512x512=262,144번의 글로벌 메모리 접근이 필요했지만
-	//32개의 워크 그룹으로 분할되어 512*32=16,384번의 글로벌 메모리 접근만 필요하게 된다
-	//워크 그룹 또한 Nvidia GPU에서 적절한 코어 숫자인 32개로 되어 있어 성능을 최대한 끌어낸다
-
-	//로컬 메모리에 접근하여 완전연결레이어 연산을 수행한다
-	float sum = 0.0f;
-	for (int i = 0; i < inDim; i++)
-		sum += local_inputs[i] * weights[output_id * inDim + i];
-	sum += biases[output_id];
-	outputs[output_id] = max(sum, 0.0f);
-}
-
-__kernel void fc_layer_optimized_512_10(
+__kernel void convolution(
 	__global float* inputs,
 	__global float* outputs,
-	__global float* weights,
+	__global float* filters,
 	__global float* biases,
-	int inDim,
-	int outDim
+	__global float* buffer,
+	int inDimSize,
+	int outDimSize,
+	int nbyn
 ) {
-	__local float local_inputs[512];
+	const int IMG_SIZE = nbyn * nbyn;  // size of ONE Image
 
-	//워크 그룹의 크기를 출력뉴런의 차원과 일치시켰다
-	//따라서 워크 그룹의 크기는 10이고 개수는 1개가 된다
-	int global_id = get_global_id(0);
-	int local_id = get_local_id(0);
-	int local_size = get_local_size(0);
+    // 현재 배치
+	int batch = get_group_id(2);
 
-	//1개의 워크 그룹에는 0부터 9까지의 로컬 인덱스를 가지는 워크 아이템들이 있으며 이게 전부다
-	//로컬 인덱스 00번은 for문을 돌면서 글로벌 메모리 00-10-20-30 ... 500 510를 로컬 메모리에 복사하고
-	//로컬 인덱스 01번은 for문을 돌면서 글로벌 메모리 01-11-21-31 ... 501 511를 로컬 메모리에 복사하고
-	//로컬 인덱스 02번은 for문을 돌면서 글로벌 메모리 02-12-22-32 ... 502 xxx를 로컬 메모리에 복사하고
-	//...
-	//로컬 인덱스 07번은 for문을 돌면서 글로벌 메모리 07-17-27-37 ... 507 xxx를 로컬 메모리에 복사하고
-	//로컬 인덱스 08번은 for문을 돌면서 글로벌 메모리 08-30-46-62 ... 508 xxx를 로컬 메모리에 복사하고
-	//로컬 인덱스 09번은 for문을 돌면서 글로벌 메모리 09-31-47-63 ... 509 xxx를 로컬 메모리에 복사하고
-	for (int i = global_id; i < inDim; i += local_size)
-		local_inputs[i] = inputs[i];
-	barrier(CLK_LOCAL_MEM_FENCE);
+	/// 현재 이미지
+	int outDim = get_group_id(0);   // 필터셋 인덱스
+    int inDim = get_local_id(0);
 
-	float sum = 0.0f;
-	for (int i = 0; i < inDim; i++)
-		sum += local_inputs[i] * weights[global_id * inDim + i];
-	sum += biases[global_id];
-	outputs[global_id] = max(sum, 0.0f);
+    // 현재 오프셋 (n x n)
+	int idx = get_group_id(1);  // 이미지 내 인덱스
+	int row = idx / nbyn;
+	int col = idx % nbyn;
+
+    // input에서 연산할 좌표
+	int offset = 0;
+	offset += batch * (inDimSize * IMG_SIZE);    // 배치만큼 이동 (특정 이미지까지)
+	offset += inDim * IMG_SIZE;    // 이미지에서 imDim까지 이동
+	offset += idx;     // 레이어에서 특정 좌표까지 이동 (목표까지)
+
+	// 연산에 적용할 필터 좌표
+	int filterOffset = 0;
+    filterOffset += outDim * (inDimSize * FILTER_OFFSET);   // 필터 그룹만큼 이동
+    filterOffset += inDim * FILTER_OFFSET;  // 그룹 내 해당하는 inDim까지 이동
+    filterOffset += 4;  // 3 X 3에서 가운데로 이동
+
+    // 임시 저장할 버퍼 좌표
+    int bufferOffset = batch * (outDimSize * inDimSize * IMG_SIZE);
+    bufferOffset += outDim * (inDimSize * IMG_SIZE);
+    bufferOffset += inDim * IMG_SIZE;
+    bufferOffset += idx;
+
+    // 하나의 셀 연산 (필터 9칸 연산결과 합)
+    float cellSum = 0;
+    for (int y = -1; y < 2; y++)
+    {
+        if ((row + y) < 0 || (row + y) >= nbyn) continue;
+        for (int x = -1; x < 2; x++)
+        {
+            if ((col + x) < 0 || (col + x) >= nbyn) continue;
+
+            cellSum += inputs[offset + y * nbyn + x] * filters[filterOffset + y * 3 + x];
+        }
+    }
+    buffer[bufferOffset] = cellSum;
+
+    barrier(CLK_LOCAL_MEM_FENCE | CLK_GLOBAL_MEM_FENCE);
+
+
+    /// 예외 처리 (inDimSize == 3일때)
+    if (inDimSize % 2 != 0)
+    {
+        if (inDim == 0)
+        {
+            for(int p = 1; p < inDimSize; p++)
+            {
+                buffer[bufferOffset] += buffer[bufferOffset + p * IMG_SIZE];
+            }
+            outputs[batch * outDimSize * IMG_SIZE + outDim * IMG_SIZE + idx] = fmax(buffer[bufferOffset] + biases[outDim], 0.0f);
+            return;
+        }
+    }
+
+
+    /// 필터 연산 결과(inDim)별로 덧셈
+    /// Reduction 연산 진행 (buffer에서 읽음)
+    for(int p = inDimSize / 2; p >= 1; p = p >> 1)
+    {
+        if (inDim < p) buffer[bufferOffset] += buffer[bufferOffset + p * IMG_SIZE];  // 내 위치로 합 연산 (나 + 나의 다음 inDim offset)
+        barrier(CLK_LOCAL_MEM_FENCE | CLK_GLOBAL_MEM_FENCE);
+    }
+
+    barrier(CLK_LOCAL_MEM_FENCE | CLK_GLOBAL_MEM_FENCE);
+
+    // 마지막 reduction 후 결과 저장
+    if (inDim == 0)
+    {
+        outputs[batch * outDimSize * IMG_SIZE + outDim * IMG_SIZE + idx] = fmax(buffer[bufferOffset] + biases[outDim], 0.0f);
+    }
 }
+
 
 const int STRIDE = 2;
 
-__kernel
-void max_pooling(
-	__global float* input,
-	__global float* output,
-	int nbyn)
-{
-	//채널
-	int dim = get_group_id(0);
+__kernel void max_pooling(
+    int batchSize,
+    __global float* inputs,
+    __global float* outputs,
+    int dimSize,
+    int nbyn
+) {
+    //차원의 인덱스
+    int dim = get_group_id(0);
 
-	int row = get_local_id(1);
-	int col = get_local_id(2);
+    //최대 풀링이 완료된 특성 맵의 크기
+    int mapOffset = nbyn * nbyn / 4;
 
-	float max = -FLT_MAX;
-	for (int y = 0; y < 2; y++) {
-		for (int x = 0; x < 2; x++) {
-			float temp = input[(nbyn * nbyn * dim) + nbyn * (2 * row + y) + 2 * col + x];
-			if (max < temp)
-				max = temp;
-		}
-	}
+    //최대 풀링이 완료된 특성 맵에서의 위치
+    int row = get_local_id(1);
+    int col = get_local_id(2);
 
-	output[(dim * nbyn / 2 * nbyn / 2) + (row * nbyn / 2) + col] = max;
+    for (int batch = 0; batch < batchSize; batch++)
+    {
+        float max = -FLT_MAX;
+        for (int y = 0; y < 2; y++) {
+            for (int x = 0; x < 2; x++) {
+                float temp = inputs[(batch * dimSize * nbyn * nbyn) + (dim * nbyn * nbyn) + nbyn * (2 * row + y) + 2 * col + x];
+                if (max < temp)
+                    max = temp;
+            }
+        }
+
+        //배치-차원-맵 위치를 고려하여 글로벌 메모리에 작성
+        outputs[(batch * dimSize * mapOffset) + (dim * mapOffset) + (row * nbyn / 2) + col] = max;
+    }
+}
+
+__kernel void fc_layer(
+    int batchSize,
+    __global float* inputs,
+    __global float* outputs,
+    __global float* weights,
+    __global float* biases,
+    int inDimSize,
+    int outDimSize
+) {
+    //출력 차원
+    int outDim = get_global_id(0);
+
+    for (int batch = 0; batch < batchSize; batch++)
+    {
+        float sum = 0.0f;
+
+        //입력차원이 512라고 한다면
+        for (int inDim = 0; inDim < inDimSize; inDim++)
+            sum += inputs[(batch * inDimSize) + inDim] * weights[outDim * inDimSize + inDim];
+
+        //편차 적용
+        sum += biases[outDim];
+
+        //배치만큼 이동 후, 이 워크 아이템의 출력차원에 활성화 함수를 적용한 값을 작성
+        outputs[(batch * outDimSize) + outDim] = fmax(sum, 0.0f);
+    }
 }
