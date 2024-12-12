@@ -1,4 +1,4 @@
-#pragma warning(disable : 4996)
+
 #include "cnn.h"
 #include <ctime>
 #include <cstdio>
@@ -14,9 +14,9 @@
 		exit(EXIT_FAILURE); \
 	}
 
-#define BATCH_SIZE (60)
+#define BATCH_SIZE (100)
 
-#define DEBUG (1)
+#define DEBUG (0)
 
 cl_int Err;
 cl_platform_id Platform;
@@ -180,12 +180,12 @@ void cnn_init() {
 
 	size_t max_work_group_size;
 	clGetDeviceInfo(Device, CL_DEVICE_MAX_WORK_GROUP_SIZE, sizeof(max_work_group_size), &max_work_group_size, NULL);
-	if (DEBUG==2) printf("Max work group size: %zu\n", max_work_group_size);
+	if (DEBUG == 2) printf("Max work group size: %zu\n", max_work_group_size);
 
 	size_t max_work_item_sizes[3];
 	clGetDeviceInfo(Device, CL_DEVICE_MAX_WORK_ITEM_SIZES, sizeof(max_work_item_sizes), max_work_item_sizes, NULL);
-	if (DEBUG==2) printf("Max work item sizes: [%zu, %zu, %zu]\n",
-		   max_work_item_sizes[0], max_work_item_sizes[1], max_work_item_sizes[2]);
+	if (DEBUG == 2) printf("Max work item sizes: [%zu, %zu, %zu]\n",
+		max_work_item_sizes[0], max_work_item_sizes[1], max_work_item_sizes[2]);
 
 }
 
@@ -200,18 +200,17 @@ void convolution(cl_mem inLayer, cl_mem outLayer, float* filter, float* biases, 
 	cl_mem bias_buffer = clCreateBuffer(Context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, sizeof(float) * outDim, biases, &Err);
 	CHECK_ERROR(Err);
 
-	cl_mem convolution_buffer = clCreateBuffer(Context, CL_MEM_READ_WRITE, sizeof(float) * nbyn * nbyn * inDim * outDim * batchSize, NULL, &Err);
-	CHECK_ERROR(Err);
-
 	// ================== 커널 매개변수 전달 ==================
-	clSetKernelArg(ConvolutionKernel, 0, sizeof(cl_mem), &inLayer);
-	clSetKernelArg(ConvolutionKernel, 1, sizeof(cl_mem), &outLayer);
-	clSetKernelArg(ConvolutionKernel, 2, sizeof(cl_mem), &filter_buffer);
-	clSetKernelArg(ConvolutionKernel, 3, sizeof(cl_mem), &bias_buffer);
-	clSetKernelArg(ConvolutionKernel, 4, sizeof(cl_mem), &convolution_buffer);
-	clSetKernelArg(ConvolutionKernel, 5, sizeof(cl_int), &inDim);
-	clSetKernelArg(ConvolutionKernel, 6, sizeof(cl_int), &outDim);
-	clSetKernelArg(ConvolutionKernel, 7, sizeof(cl_int), &nbyn);
+	int argIdx = 0;
+	clSetKernelArg(ConvolutionKernel, argIdx++, sizeof(cl_mem), &inLayer);
+	clSetKernelArg(ConvolutionKernel, argIdx++, sizeof(cl_mem), &outLayer);
+	clSetKernelArg(ConvolutionKernel, argIdx++, sizeof(cl_mem), &filter_buffer);
+	clSetKernelArg(ConvolutionKernel, argIdx++, sizeof(cl_mem), &bias_buffer);
+	clSetKernelArg(ConvolutionKernel, argIdx++, sizeof(float) * 9 * inDim, NULL);
+	clSetKernelArg(ConvolutionKernel, argIdx++, sizeof(float) * inDim, NULL);
+	clSetKernelArg(ConvolutionKernel, argIdx++, sizeof(cl_int), &inDim);
+	clSetKernelArg(ConvolutionKernel, argIdx++, sizeof(cl_int), &outDim);
+	clSetKernelArg(ConvolutionKernel, argIdx++, sizeof(cl_int), &nbyn);
 
 	// ================== 글로벌 워크 아이템 및 로컬 워크 아이템 ==================
 	size_t global_work_size[] = { (size_t)(outDim * inDim), (size_t)(nbyn*nbyn), (size_t)batchSize };
@@ -235,7 +234,6 @@ void convolution(cl_mem inLayer, cl_mem outLayer, float* filter, float* biases, 
 	// ================== 메모리 해제 ==================
 	clReleaseMemObject(filter_buffer);
 	clReleaseMemObject(bias_buffer);
-	clReleaseMemObject(convolution_buffer);
 }
 
 
@@ -292,13 +290,14 @@ void fc_layer(cl_mem inLayer, cl_mem outLayer, float* weights, float* biases, in
 
 	// ================== 커널 매개변수 전달 ==================
 	int batchSize = BATCH_SIZE;
-	clSetKernelArg(FCLayerKernel, 0, sizeof(int), &batchSize);
-	clSetKernelArg(FCLayerKernel, 1, sizeof(cl_mem), &inLayer);
-	clSetKernelArg(FCLayerKernel, 2, sizeof(cl_mem), &outLayer);
-	clSetKernelArg(FCLayerKernel, 3, sizeof(cl_mem), &weight_buffer);
-	clSetKernelArg(FCLayerKernel, 4, sizeof(cl_mem), &bias_buffer);
-	clSetKernelArg(FCLayerKernel, 5, sizeof(int), &inDim);
-	clSetKernelArg(FCLayerKernel, 6, sizeof(int), &outDim);
+	int argIdx = 0;
+	clSetKernelArg(FCLayerKernel, argIdx++, sizeof(int), &batchSize);
+	clSetKernelArg(FCLayerKernel, argIdx++, sizeof(cl_mem), &inLayer);
+	clSetKernelArg(FCLayerKernel, argIdx++, sizeof(cl_mem), &outLayer);
+	clSetKernelArg(FCLayerKernel, argIdx++, sizeof(cl_mem), &weight_buffer);
+	clSetKernelArg(FCLayerKernel, argIdx++, sizeof(cl_mem), &bias_buffer);
+	clSetKernelArg(FCLayerKernel, argIdx++, sizeof(int), &inDim);
+	clSetKernelArg(FCLayerKernel, argIdx++, sizeof(int), &outDim);
 
 	// ================== 실행하고 결과 받기 ==================
 	Err = clEnqueueNDRangeKernel(Queue, FCLayerKernel, 2, NULL, global_work_size, NULL, 0, NULL, &read_event);
@@ -451,4 +450,5 @@ void cnn(float* images, float* network, int* labels, float* confidences, int num
 	for (int i = 0; i < 21; i++)
 		clReleaseMemObject(layers_buffer[i]);
 
+	clReleaseCommandQueue(Queue);
 }
