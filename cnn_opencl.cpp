@@ -206,7 +206,6 @@ void convolution(cl_mem inLayer, cl_mem outLayer, float* filter, float* biases, 
 	clSetKernelArg(ConvolutionKernel, argIdx++, sizeof(cl_mem), &outLayer);
 	clSetKernelArg(ConvolutionKernel, argIdx++, sizeof(cl_mem), &filter_buffer);
 	clSetKernelArg(ConvolutionKernel, argIdx++, sizeof(cl_mem), &bias_buffer);
-	clSetKernelArg(ConvolutionKernel, argIdx++, sizeof(float) * 9 * inDim, NULL);
 	clSetKernelArg(ConvolutionKernel, argIdx++, sizeof(float) * inDim, NULL);
 	clSetKernelArg(ConvolutionKernel, argIdx++, sizeof(cl_int), &inDim);
 	clSetKernelArg(ConvolutionKernel, argIdx++, sizeof(cl_int), &outDim);

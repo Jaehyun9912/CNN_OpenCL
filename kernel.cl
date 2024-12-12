@@ -8,7 +8,6 @@ __kernel void convolution(
 	__global float* outputs,
 	__global float* filters,
 	__global float* biases,
-	__local float* l_filter,
 	__local float* buffer,
 	int inDimSize,
 	int outDimSize,
@@ -37,13 +36,8 @@ __kernel void convolution(
 	// 연산에 적용할 필터 불러오기
 	int filterOffset = 0;
 	filterOffset += outDim * (inDimSize * FILTER_OFFSET);   // 필터 그룹만큼 이동
-	if (inDim == 0)
-	{
-	    for(int i = 0; i < inDimSize * FILTER_OFFSET; i++)
-	        l_filter[i] = filters[filterOffset + i];
-	}
-
-	barrier(CLK_LOCAL_MEM_FENCE);
+	filterOffset += inDim * FILTER_OFFSET;
+	filterOffset += 4;
 
 	// 하나의 셀 연산 (필터 9칸 연산결과 합)
 	float cellSum = 0;
@@ -54,17 +48,15 @@ __kernel void convolution(
 		{
 			if ((col + x) < 0 || (col + x) >= nbyn) continue;
 
-			cellSum += inputs[offset + y * nbyn + x] * l_filter[inDim * FILTER_OFFSET + y * FILTER_SIZE + x];
+			cellSum += inputs[offset + y * nbyn + x] * filters[filterOffset + y * FILTER_SIZE + x];
 		}
 	}
 	buffer[inDim] = cellSum;
 
-
 	barrier(CLK_LOCAL_MEM_FENCE);
 
-
 	/// 예외 처리 (inDimSize == 3일때)
-	if (inDimSize == 3)
+	if (inDimSize % 2 != 0)
 	{
 		if (inDim == 0)
 		{
