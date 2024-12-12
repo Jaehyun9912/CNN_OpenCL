@@ -15,29 +15,28 @@ __kernel void convolution(
 ) {
 	const int IMG_SIZE = nbyn * nbyn;  // size of ONE Image
 
-	// 현재 배치
+	// 현재 코어 정보
 	int batch = get_group_id(2);
-
-	/// 현재 이미지
 	int outDim = get_group_id(0);   // 필터셋 인덱스
     int inDim = get_local_id(0);
-
-    // 현재 오프셋 (n x n)
 	int idx = get_group_id(1);  // 이미지 내 인덱스
 	int row = idx / nbyn;
 	int col = idx % nbyn;
 
-    // input에서 연산할 좌표
+
+    // input에서 연산할 좌표 불러오기
 	int offset = 0;
 	offset += batch * (inDimSize * IMG_SIZE);    // 배치만큼 이동 (특정 이미지까지)
 	offset += inDim * IMG_SIZE;    // 이미지에서 imDim까지 이동
 	offset += idx;     // 레이어에서 특정 좌표까지 이동 (목표까지)
+
 
 	// 연산에 적용할 필터 불러오기
 	int filterOffset = 0;
 	filterOffset += outDim * (inDimSize * FILTER_OFFSET);   // 필터 그룹만큼 이동
 	filterOffset += inDim * FILTER_OFFSET;
 	filterOffset += 4;
+
 
 	// 하나의 셀 연산 (필터 9칸 연산결과 합)
 	float cellSum = 0;
@@ -52,10 +51,10 @@ __kernel void convolution(
 		}
 	}
 	buffer[inDim] = cellSum;
-
 	barrier(CLK_LOCAL_MEM_FENCE);
 
-	/// 예외 처리 (inDimSize == 3일때)
+
+	/// 리덕션 예외 처리 (inDimSize == 3일때)
 	if (inDimSize % 2 != 0)
 	{
 		if (inDim == 0)
@@ -69,12 +68,13 @@ __kernel void convolution(
 		}
 	}
 
+
 	/// 필터 연산 결과(inDim)별로 덧셈
 	/// Reduction 연산 진행 (buffer에서 읽음)
 	for (int p = inDimSize / 2; p >= 1; p = p >> 1)
 	{
 		if (inDim < p) buffer[inDim] += buffer[inDim + p];  // 내 위치로 합 연산 (나 + 나의 다음 inDim offset)
-		barrier(CLK_LOCAL_MEM_FENCE | CLK_GLOBAL_MEM_FENCE);
+		barrier(CLK_LOCAL_MEM_FENCE);
 	}
 
 	// 마지막 reduction 후 결과 저장
