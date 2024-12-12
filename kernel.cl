@@ -1,93 +1,405 @@
-const int FILTER_SIZE = 3;          // 필터 크기 (3x3)
+const int FILTER_SIZE = 3;
+const int FILTER_OFFSET = 9;
 
-
-const int FILTER_OFFSET = FILTER_SIZE * FILTER_SIZE;
-
-__kernel void convolution(
+__kernel void convolution_batch_optimized(
+	int batchSize,
 	__global float* inputs,
-	__global float* outputs,
 	__global float* filters,
-	__global float* biases,
-	__local float* buffer,
+	__global float* convolutions,
 	int inDimSize,
 	int outDimSize,
 	int nbyn
 ) {
-	const int IMG_SIZE = nbyn * nbyn;  // size of ONE Image
+	//입력 및 출력 차원의 맵 크기
+	int mapOffset = nbyn * nbyn;
 
-	// 현재 코어 정보
-	int batch = get_group_id(2);
-	int outDim = get_group_id(0);   // 필터셋 인덱스
-    int inDim = get_local_id(0);
-	int idx = get_group_id(1);  // 이미지 내 인덱스
-	int row = idx / nbyn;
-	int col = idx % nbyn;
+	//입력 위치
+	int idx = get_local_id(1);
+	int x = idx / nbyn;
+	int y = idx % nbyn;
 
+	//출력 차원의 인덱스
+	int outDim = get_group_id(0);
 
-    // input에서 연산할 좌표 불러오기
-	int offset = 0;
-	offset += batch * (inDimSize * IMG_SIZE);    // 배치만큼 이동 (특정 이미지까지)
-	offset += inDim * IMG_SIZE;    // 이미지에서 imDim까지 이동
-	offset += idx;     // 레이어에서 특정 좌표까지 이동 (목표까지)
+	//입력 차원의 인덱스
+	int inDim = get_group_id(2);
 
-
-	// 연산에 적용할 필터 불러오기
-	int filterOffset = 0;
-	filterOffset += outDim * (inDimSize * FILTER_OFFSET);   // 필터 그룹만큼 이동
-	filterOffset += inDim * FILTER_OFFSET;
-	filterOffset += 4;
-
-
-	// 하나의 셀 연산 (필터 9칸 연산결과 합)
-	float cellSum = 0;
-	for (int y = -1; y < 2; y++)
+	//배치 전환
+	for (int batch = 0; batch < batchSize; batch++)
 	{
-		if ((row + y) < 0 || (row + y) >= nbyn) continue;
-		for (int x = -1; x < 2; x++)
-		{
-			if ((col + x) < 0 || (col + x) >= nbyn) continue;
+		//현 입력 차원 및 맵 위치에 대한 컨볼루션
+		float sum = 0.0f;
 
-			cellSum += inputs[offset + y * nbyn + x] * filters[filterOffset + y * FILTER_SIZE + x];
+		for (int fx = 0; fx < FILTER_SIZE; fx++)
+		{
+			for (int fy = 0; fy < FILTER_SIZE; fy++)
+			{
+				//필터와 곱할 위치를 연산
+				int inputsX = x + fx - 1;
+				int inputsY = y + fy - 1;
+
+				//필터와 곱셈 후 결과값에 누적
+				if (inputsX >= 0 && inputsX < nbyn && inputsY >= 0 && inputsY < nbyn)
+				{
+					//필터는 배치가 바뀌어도 일정함
+					float filter = filters[(outDim * FILTER_OFFSET * inDimSize) + (inDim * FILTER_OFFSET) + (fx * FILTER_SIZE + fy)];
+
+					//입력은 배치가 바뀌면 달라짐
+					float input = inputs[(batch * inDimSize * mapOffset) + (inDim * mapOffset) + (inputsX * nbyn + inputsY)];
+
+					//현 맵 위치에 대한 컨볼루션 연산
+					sum += input * filter;
+				}
+			}
+		}
+
+		// 입력 차원에 대한 컨볼루션 값
+		convolutions[
+			(batch * outDimSize * inDimSize * mapOffset) +
+				(outDim * inDimSize * mapOffset) +
+				(inDim * mapOffset) +
+				idx]
+			= sum;
+	}
+}
+
+__kernel void make_feature_batch_optimized(
+	int batchSize,
+	__global float* convolutions,
+	__global float* biases,
+	__global float* outputs,
+	int inDimSize,
+	int outDimSize,
+	int nbyn
+) {
+	//입력 및 출력 차원의 맵 크기
+	int mapOffset = nbyn * nbyn;
+
+	//입력 위치
+	int idx = get_local_id(1);
+
+	//출력 차원의 인덱스
+	int outDim = get_group_id(0);
+
+	for (int batch = 0; batch < batchSize; batch++)
+	{
+		//모든 입력차원의 값을 더한다
+		float sum = 0.0f;
+
+		//입력차원 순회
+		for (int inDim = 0; inDim < inDimSize; inDim++)
+		{
+			sum += convolutions[(batch * outDimSize * inDimSize * mapOffset) +
+				(outDim * inDimSize * mapOffset) +
+				(inDim * mapOffset) +
+				idx];
+		}
+
+		sum += biases[outDim];
+
+		outputs[(batch * outDimSize * mapOffset) +
+			(outDim * mapOffset) +
+			idx] = fmax(sum, 0.0f);
+	}
+}
+
+__kernel void convolution_batch_optimized_2(
+	int batchSize,
+	__global float* inputs,
+	__global float* outputs,
+	__global float* filters,
+	__global float* biases,
+	int inDimSize,
+	int outDimSize,
+	int nbyn
+) {
+	//입력 및 출력 차원의 맵 크기
+	int mapOffset = nbyn * nbyn;
+
+	//배치
+	int batch = get_group_id(0) / mapOffset;
+
+	//입력 위치
+	int idx = get_group_id(0) % mapOffset;
+	int x = idx / nbyn;
+	int y = idx % nbyn;
+
+	//입력 차원의 인덱스
+	int inDim = get_local_id(1);
+
+	//출력 차원의 인덱스
+	int outDim = get_group_id(2);
+
+	//각 입력 차원의 컨볼루션 값을 저장하는 로컬 메모리
+	__local float conv[512];
+
+	//현 입력 차원 및 맵 위치에 대한 컨볼루션
+	float sum = 0.0f;
+
+	for (int fx = 0; fx < FILTER_SIZE; fx++)
+	{
+		for (int fy = 0; fy < FILTER_SIZE; fy++)
+		{
+			//필터와 곱할 위치를 연산
+			int inputsX = x + fx - 1;
+			int inputsY = y + fy - 1;
+
+			//필터와 곱셈 후 결과값에 누적
+			if (inputsX >= 0 && inputsX < nbyn && inputsY >= 0 && inputsY < nbyn)
+			{
+				//필터는 배치가 바뀌어도 일정함
+				float filter = filters[(outDim * FILTER_OFFSET * inDimSize) + (inDim * FILTER_OFFSET) + (fx * FILTER_SIZE + fy)];
+
+				//입력은 배치가 바뀌면 달라짐
+				float input = inputs[(batch * inDimSize * mapOffset) + (inDim * mapOffset) + (inputsX * nbyn + inputsY)];
+
+				//현 맵 위치에 대한 컨볼루션 연산
+				sum += input * filter;
+			}
 		}
 	}
-	buffer[inDim] = cellSum;
+
+	//각 입력 차원에서의 컨볼루션 값
+	conv[inDim] = sum;
 	barrier(CLK_LOCAL_MEM_FENCE);
 
-
-	/// 리덕션 예외 처리 (inDimSize == 3일때)
-	if (inDimSize % 2 != 0)
-	{
-		if (inDim == 0)
-		{
-			for (int p = 1; p < inDimSize; p++)
-			{
-				buffer[inDim] += buffer[inDim + p];
-			}
-			outputs[batch * outDimSize * IMG_SIZE + outDim * IMG_SIZE + idx] = fmax(buffer[inDim] + biases[outDim], 0.0f);
-			return;
-		}
-	}
-
-
-	/// 필터 연산 결과(inDim)별로 덧셈
-	/// Reduction 연산 진행 (buffer에서 읽음)
-	for (int p = inDimSize / 2; p >= 1; p = p >> 1)
-	{
-		if (inDim < p) buffer[inDim] += buffer[inDim + p];  // 내 위치로 합 연산 (나 + 나의 다음 inDim offset)
+	//리덕션
+	for (int p = get_local_size(1) / 2; p >= 1; p = p >> 1) {
+		if (inDim < p)
+			conv[inDim] += conv[inDim + p];
 		barrier(CLK_LOCAL_MEM_FENCE);
 	}
 
-	// 마지막 reduction 후 결과 저장
 	if (inDim == 0)
 	{
-		outputs[batch * outDimSize * IMG_SIZE + outDim * IMG_SIZE + idx] = fmax(buffer[0] + biases[outDim], 0.0f);
+		//합
+		float value = conv[0];
+
+		//편차
+		value += biases[outDim];
+
+		//특성 맵 작성
+		outputs[(batch * outDimSize * mapOffset) +
+			(outDim * mapOffset) +
+			idx] = fmax(value, 0.0f);
 	}
 }
 
 
+__kernel void convolution_batch_optimized_3(
+	int batchSize,
+	__global float* inputs,
+	__global float* outputs,
+	__global float* filters,
+	__global float* biases,
+	int inDimSize,
+	int outDimSize,
+	int nbyn
+) {
+	//입력 및 출력 차원의 맵 크기
+	int mapOffset = nbyn * nbyn;
+
+	//배치
+	int batch = get_group_id(2) / outDimSize;
+
+	//입력 위치
+	int lidx = get_local_id(0);
+	int lx = lidx / 2;
+	int ly = lidx % 2;
+
+	int gidx = 2 * 2 * get_group_id(0) + lidx;
+	int gx = gidx / nbyn;
+	int gy = gidx % nbyn;
+
+	//입력 차원의 인덱스
+	int inDim = get_local_id(1);
+
+	//출력 차원의 인덱스
+	int outDim = get_group_id(2) % outDimSize;
+
+	//각 입력 차원의 컨볼루션 값을 저장하는 로컬 메모리
+	__local float conv[1024];
+
+	//현 입력 차원 및 맵 위치에 대한 컨볼루션
+	float sum = 0.0f;
+
+	int inputsX;
+	int inputsY;
+	float filter;
+	int filterBegin = (outDim * FILTER_OFFSET * inDimSize) + (inDim * FILTER_OFFSET);
+	float input;
+	int inputBegin = (batch * inDimSize * mapOffset) + (inDim * mapOffset);
+
+	for (int fx = 0; fx < FILTER_SIZE; fx++)
+	{
+		inputsX = gx + fx - 1;
+		if (inputsX < 0 || inputsX >= nbyn) continue;
+
+		for (int fy = 0; fy < FILTER_SIZE; fy++)
+		{
+			inputsY = gy + fy - 1;
+
+			if (inputsY >= 0 && inputsY < nbyn)
+			{
+				filter = filters[filterBegin + (fx * FILTER_SIZE + fy)];
+				input = inputs[inputBegin + (inputsX * nbyn + inputsY)];
+				sum += input * filter;
+			}
+		}
+	}
+
+	conv[(lidx * inDimSize) + inDim] = sum;
+	barrier(CLK_LOCAL_MEM_FENCE);
+
+	//리덕션
+	for (int p = get_local_size(1) / 2; p >= 1; p = p >> 1) {
+		if (inDim < p)
+			conv[(lidx * inDimSize) + inDim] += conv[(lidx * inDimSize) + inDim + p];
+		barrier(CLK_LOCAL_MEM_FENCE);
+	}
+
+	if (inDim == 0)
+	{
+		//합
+		float value = conv[(lidx * inDimSize)];
+
+		//편차
+		value += biases[outDim];
+
+		//특성 맵 작성
+		outputs[(batch * outDimSize * mapOffset) +
+				(outDim * mapOffset) +
+				gidx] = fmax(value, 0.0f);
+	}
+}
+
+
+
+
+
+
+__kernel void convolution_batch_optimized_4(
+	int batchSize,
+	__global float* inputs,
+	__global float* filters,
+	__global float* reducts,
+	int inDimSize,
+	int outDimSize,
+	int nbyn
+) {
+	//입력 및 출력 차원의 맵 크기
+	int mapOffset = nbyn * nbyn;
+
+	//배치
+	int batch = get_group_id(2) / outDimSize;
+
+	//입력 위치
+	int lidx = get_local_id(0);
+	int lx = lidx / 4;
+	int ly = lidx % 4;
+
+	int gidx = get_global_id(0);
+	int gx = gidx / nbyn;
+	int gy = gidx % nbyn;
+
+	//입력 차원의 인덱스
+	int l_inDim = get_local_id(1);
+	int l_inDimSize = get_local_size(1);
+	int g_inDim = l_inDimSize * get_group_id(1) + l_inDim;
+
+	//출력 차원의 인덱스
+	int outDim = get_group_id(2) % outDimSize;
+
+	//각 입력 차원의 컨볼루션 값을 저장하는 로컬 메모리
+	__local float conv[1024];
+
+	//현 입력 차원 및 맵 위치에 대한 컨볼루션
+	float sum = 0.0f;
+
+	int inputsX;
+	int inputsY;
+	float filter;
+	int filterBegin = (outDim * FILTER_OFFSET * inDimSize) + (g_inDim * FILTER_OFFSET);
+	float input;
+	int inputBegin = (batch * inDimSize * mapOffset) + (g_inDim * mapOffset);
+
+	for (int fx = 0; fx < FILTER_SIZE; fx++)
+	{
+		inputsX = gx + fx - 1;
+		if (inputsX < 0 || inputsX >= nbyn) continue;
+
+		for (int fy = 0; fy < FILTER_SIZE; fy++)
+		{
+			inputsY = gy + fy - 1;
+
+			if (inputsY >= 0 && inputsY < nbyn)
+			{
+				filter = filters[filterBegin + (fx * FILTER_SIZE + fy)];
+				input = inputs[inputBegin + (inputsX * nbyn + inputsY)];
+				sum += input * filter;
+			}
+		}
+	}
+
+	conv[(lidx * l_inDimSize) + l_inDim] = sum;
+	barrier(CLK_LOCAL_MEM_FENCE);
+
+	//리덕션
+	for (int p = l_inDimSize / 2; p >= 1; p = p >> 1) {
+		if (l_inDim < p)
+			conv[(lidx * l_inDimSize) + l_inDim] += conv[(lidx * l_inDimSize) + l_inDim + p];
+		barrier(CLK_LOCAL_MEM_FENCE);
+	}
+
+	// 픽셀위치 * l_inDimSize(8) + get_group_id(1);
+	int mapPos = (batch * outDimSize * mapOffset) + (outDim * mapOffset);
+	int reductionPos = gidx * 8 + get_group_id(1);
+	reducts[mapPos + reductionPos] = conv[(lidx * l_inDimSize)];
+}
+
+__kernel void make_feature_batch_optimized_4(
+	int batchSize,
+	__global float* reducts,
+	__global float* biases,
+	__global float* outputs,
+	int inDimSize,
+	int outDimSize,
+	int nbyn
+) {
+	int mapOffset = nbyn * nbyn;
+
+	int batch = get_global_id(1) / outDimSize;
+
+	int outDim = get_global_id(1) % outDimSize;
+
+	int gidx = get_global_id(0);
+
+	float sum = 0.0f;
+
+	int mapPos = (batch * outDimSize * mapOffset) + (outDim * mapOffset);
+
+	for (int group_id = 0; group_id < 8; group_id++)
+	{
+		int reductionPos = gidx * 8 + group_id;
+		sum += reducts[mapPos + reductionPos];
+	}
+
+	//편차
+	sum += biases[outDim];
+
+	//특성 맵 작성
+	outputs[(batch * outDimSize * mapOffset) +
+		(outDim * mapOffset) +
+		gidx] = fmax(sum, 0.0f);
+}
+
+
+
+
+
 const int STRIDE = 2;
 
-__kernel void max_pooling(
+__kernel void max_pooling_batch_optimized(
 	int batchSize,
 	__global float* inputs,
 	__global float* outputs,
@@ -120,7 +432,7 @@ __kernel void max_pooling(
 	}
 }
 
-__kernel void fc_layer(
+__kernel void fc_layer_batch_optimized(
 	int batchSize,
 	__global float* inputs,
 	__global float* outputs,
