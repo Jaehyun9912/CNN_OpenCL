@@ -44,9 +44,13 @@ __kernel void convolution(
 
     // 하나의 셀 연산 (필터 9칸 연산결과 합)
     float cellSum = 0;
+
+    #pragma unroll 3
     for (int y = -1; y < 2; y++)
     {
         if ((row + y) < 0 || (row + y) >= nbyn) continue;
+
+        #pragma unroll 3
         for (int x = -1; x < 2; x++)
         {
             if ((col + x) < 0 || (col + x) >= nbyn) continue;
@@ -111,6 +115,7 @@ __kernel void max_pooling(
     int row = get_local_id(1);
     int col = get_local_id(2);
 
+    #pragma unroll 100
     for (int batch = 0; batch < batchSize; batch++)
     {
         float max = -FLT_MAX;
@@ -139,6 +144,7 @@ __kernel void fc_layer(
     //출력 차원
     int outDim = get_global_id(0);
 
+    #pragma unroll 100
     for (int batch = 0; batch < batchSize; batch++)
     {
         float sum = 0.0f;

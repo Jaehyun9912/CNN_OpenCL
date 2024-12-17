@@ -14,7 +14,7 @@
 		exit(EXIT_FAILURE); \
 	}
 
-#define BATCH_SIZE (60)
+#define BATCH_SIZE (100)
 
 #define DEBUG (1)
 
