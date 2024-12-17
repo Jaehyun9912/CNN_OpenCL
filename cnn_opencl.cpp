@@ -319,8 +319,6 @@ void convolution_batch_optimized_2(cl_mem inLayer, cl_mem outLayer, float* filte
 	clReleaseMemObject(filter_buffer);
 	clReleaseMemObject(bias_buffer);
 }
-
-
 void convolution_batch_optimized_3(cl_mem inLayer, cl_mem outLayer, float* filter, float* biases, int inDim, int outDim, int nbyn)
 {
 	int batchSize = BATCH_SIZE;
@@ -362,8 +360,6 @@ void convolution_batch_optimized_3(cl_mem inLayer, cl_mem outLayer, float* filte
 	clReleaseMemObject(filter_buffer);
 	clReleaseMemObject(bias_buffer);
 }
-
-
 void convolution_batch_optimized_4(cl_mem inLayer, cl_mem outLayer, float* filter, float* biases, int inDim, int outDim, int nbyn)
 {
 	int batchSize = BATCH_SIZE;
@@ -588,7 +584,7 @@ void cnn(float* images, float* network, int* labels, float* confidences, int num
 	clReleaseMemObject(images_buffer);
 
 	layers_buffer[1] = createLayerBuffer(1);
-	convolution_batch_optimized_3(layers_buffer[0], layers_buffer[1], w[1], b[1], INPUT_DIM[1], OUTPUT_DIM[1], NBYN[1]);
+	convolution_batch_optimized_4(layers_buffer[0], layers_buffer[1], w[1], b[1], INPUT_DIM[1], OUTPUT_DIM[1], NBYN[1]);
 	clReleaseMemObject(layers_buffer[0]);
 
 	layers_buffer[2] = createLayerBuffer(2);
@@ -598,11 +594,11 @@ void cnn(float* images, float* network, int* labels, float* confidences, int num
 
 #pragma region 2단계
 	layers_buffer[3] = createLayerBuffer(3);
-	convolution_batch_optimized_3(layers_buffer[2], layers_buffer[3], w[3], b[3], INPUT_DIM[3], OUTPUT_DIM[3], NBYN[3]);
+	convolution_batch_optimized_4(layers_buffer[2], layers_buffer[3], w[3], b[3], INPUT_DIM[3], OUTPUT_DIM[3], NBYN[3]);
 	clReleaseMemObject(layers_buffer[2]);
 
 	layers_buffer[4] = createLayerBuffer(4);
-	convolution_batch_optimized_3(layers_buffer[3], layers_buffer[4], w[4], b[4], INPUT_DIM[4], OUTPUT_DIM[4], NBYN[4]);
+	convolution_batch_optimized_4(layers_buffer[3], layers_buffer[4], w[4], b[4], INPUT_DIM[4], OUTPUT_DIM[4], NBYN[4]);
 	clReleaseMemObject(layers_buffer[3]);
 
 	layers_buffer[5] = createLayerBuffer(5);
@@ -612,15 +608,15 @@ void cnn(float* images, float* network, int* labels, float* confidences, int num
 
 #pragma region 3단계
 	layers_buffer[6] = createLayerBuffer(6);
-	convolution_batch_optimized_3(layers_buffer[5], layers_buffer[6], w[6], b[6], INPUT_DIM[6], OUTPUT_DIM[6], NBYN[6]);
+	convolution_batch_optimized_4(layers_buffer[5], layers_buffer[6], w[6], b[6], INPUT_DIM[6], OUTPUT_DIM[6], NBYN[6]);
 	clReleaseMemObject(layers_buffer[5]);
 
 	layers_buffer[7] = createLayerBuffer(7);
-	convolution_batch_optimized_3(layers_buffer[6], layers_buffer[7], w[7], b[7], INPUT_DIM[7], OUTPUT_DIM[7], NBYN[7]);
+	convolution_batch_optimized_4(layers_buffer[6], layers_buffer[7], w[7], b[7], INPUT_DIM[7], OUTPUT_DIM[7], NBYN[7]);
 	clReleaseMemObject(layers_buffer[6]);
 
 	layers_buffer[8] = createLayerBuffer(8);
-	convolution_batch_optimized_3(layers_buffer[7], layers_buffer[8], w[8], b[8], INPUT_DIM[8], OUTPUT_DIM[8], NBYN[8]);
+	convolution_batch_optimized_4(layers_buffer[7], layers_buffer[8], w[8], b[8], INPUT_DIM[8], OUTPUT_DIM[8], NBYN[8]);
 	clReleaseMemObject(layers_buffer[7]);
 
 	layers_buffer[9] = createLayerBuffer(9);
@@ -630,15 +626,15 @@ void cnn(float* images, float* network, int* labels, float* confidences, int num
 
 #pragma region 4단계
 	layers_buffer[10] = createLayerBuffer(10);
-	convolution_batch_optimized_3(layers_buffer[9], layers_buffer[10], w[10], b[10], INPUT_DIM[10], OUTPUT_DIM[10], NBYN[10]);
+	convolution_batch_optimized_4(layers_buffer[9], layers_buffer[10], w[10], b[10], INPUT_DIM[10], OUTPUT_DIM[10], NBYN[10]);
 	clReleaseMemObject(layers_buffer[9]);
 
 	layers_buffer[11] = createLayerBuffer(11);
-	convolution_batch_optimized_2(layers_buffer[10], layers_buffer[11], w[11], b[11], INPUT_DIM[11], OUTPUT_DIM[11], NBYN[11]);
+	convolution_batch_optimized_4(layers_buffer[10], layers_buffer[11], w[11], b[11], INPUT_DIM[11], OUTPUT_DIM[11], NBYN[11]);
 	clReleaseMemObject(layers_buffer[10]);
 
 	layers_buffer[12] = createLayerBuffer(12);
-	convolution_batch_optimized_2(layers_buffer[11], layers_buffer[12], w[12], b[12], INPUT_DIM[12], OUTPUT_DIM[12], NBYN[12]);
+	convolution_batch_optimized_4(layers_buffer[11], layers_buffer[12], w[12], b[12], INPUT_DIM[12], OUTPUT_DIM[12], NBYN[12]);
 	clReleaseMemObject(layers_buffer[11]);
 
 	layers_buffer[13] = createLayerBuffer(13);
